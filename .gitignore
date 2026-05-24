@@ -5,7 +5,6 @@
 /failed_files.json
 /progress.py
 /send_email.spec
-/send_email_gui.py
 /status.json
 /test_case.md
 /test_send_email.py
