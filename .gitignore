@@ -1,11 +1,9 @@
 /.trae
 /build.bat
 /config.json
-/CONFIG_GUIDE.md
 /email_template.txt
 /failed_files.json
 /progress.py
-/requirements.txt
 /send_email.spec
 /send_email_gui.py
 /status.json
@@ -14,7 +12,5 @@
 /__pycache__
 /【test】朋辈证书
 /【test】朋辈证书.zip
-/使用说明.md
-/开发规范.md
 /打包说明.md
 /项目反思报告.md
