@@ -2,16 +2,21 @@ import os
 import re
 import json
 import time
+import threading
 import logging
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
-import openpyxl
 import smtplib
+import webbrowser
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 from email.header import Header
-import threading
+from tkinter import filedialog, messagebox, END, WORD, BOTH, LEFT, RIGHT, X, Y, TOP, BOTTOM, W, E, N, S, VERTICAL, HORIZONTAL
+
+import tkinter as tk
+from tkinter import ttk
+from tkinter.scrolledtext import ScrolledText
+import openpyxl
 
 try:
     import customtkinter as ctk
@@ -19,1377 +24,2069 @@ try:
 except ImportError:
     USE_CUSTOMTK = False
 
+if USE_CUSTOMTK:
+    ctk.set_appearance_mode("light")
+    ctk.set_default_color_theme("blue")
 
-def get_color(color_name):
-    """根据主题返回对比度合适的颜色"""
-    if not USE_CUSTOMTK:
-        return color_name
-    # customtkinter 浅色主题下使用深色以确保对比度
-    color_map = {
-        'lightblue': '#4a90d9',
-        'green': '#2d8a2d',
-        'orange': '#cc7000',
-        'red': '#c93030',
-        'lightgreen': '#3cb043',
-        'blue': '#4a90d9',
-        'gray': '#6c757d'
-    }
-    return color_map.get(color_name, color_name)
+PRIMARY = "#0078D4"
+PRIMARY_HOVER = "#106EBE"
+PRIMARY_PRESSED = "#005A9E"
+SUCCESS = "#107C10"
+SUCCESS_HOVER = "#0B6A0B"
+WARNING = "#FF8C00"
+ERROR = "#D13438"
+BG = "#F3F3F3"
+CARD = "#FFFFFF"
+CARD_BORDER = "#E0E0E0"
+TEXT_PRIMARY = "#1A1A1A"
+TEXT_SECONDARY = "#616161"
+TEXT_DISABLED = "#A0A0A0"
+INPUT_BG = "#FFFFFF"
+INPUT_BORDER = "#8A8A8A"
+INPUT_FOCUS = PRIMARY
+BORDER_RADIUS = 8
+FONT_FAMILY = "Segoe UI"
+FONT_SIZE_TITLE = 24
+FONT_SIZE_SUBTITLE = 16
+FONT_SIZE_BODY = 13
+FONT_SIZE_SMALL = 11
+FONT_SIZE_BUTTON = 13
+FONT_SIZE_STEP_NUM = 16
+FONT_SIZE_STEP_LABEL = 10
 
-
-FIELD_TYPES = {
-    'key': '关键字段（匹配文件名编号）',
-    'name': '姓名/称呼字段',
-    'email': '邮件地址字段',
-    'ignore': '不使用此字段'
-}
-
-FIELD_TYPE_KEYS = list(FIELD_TYPES.keys())
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
 
 def extract_key_from_filename(filename):
-    name_without_ext = os.path.splitext(filename)[0]
-    match = re.match(r'^(\d+)', name_without_ext)
-    if match:
-        return match.group(1)
+    name = os.path.splitext(filename)[0]
+    patterns = [
+        r'签署后[：:](\d+)[-_]',
+        r'(\d{6,})[-_]',
+        r'(\d{6,})',
+    ]
+    for pat in patterns:
+        m = re.search(pat, name)
+        if m:
+            return m.group(1)
     return None
 
 
 def suggest_field_type(header):
-    if not header:
-        return 'ignore'
-    h = str(header).lower()
-    if '学号' in h or '编号' in h or '工号' in h or 'id' in h:
-        return 'key'
-    elif '姓名' in h or '名字' in h:
-        return 'name'
-    elif '邮箱' in h or '邮件' in h or 'e-mail' in h:
-        return 'email'
-    elif '电话' in h or '手机' in h:
-        return 'ignore'
-    return 'ignore'
+    h = header.strip().lower()
+    email_kw = ["邮箱", "email", "e-mail", "邮件", "mail", "电子邮件"]
+    name_kw = ["姓名", "名字", "name", "学生名", "收件人"]
+    id_kw = ["学号", "id", "工号", "编号", "studentid", "student_id", "no", "序号"]
+    phone_kw = ["电话", "手机", "phone", "tel", "mobile"]
+    for kw in email_kw:
+        if kw in h:
+            return "email"
+    for kw in name_kw:
+        if kw in h:
+            return "name"
+    for kw in id_kw:
+        if kw in h:
+            return "id"
+    for kw in phone_kw:
+        if kw in h:
+            return "phone"
+    return "other"
 
 
 class ColumnMapping:
     def __init__(self):
-        self.columns = []
+        self.headers = []
+        self.data = []
         self.mapping = {}
+        self._col_cache = {}
 
-    def load_from_excel(self, file_path):
-        wb = openpyxl.load_workbook(file_path)
-        ws = wb.active
-        self.columns = []
-        self.mapping = {}
-
-        for i, cell in enumerate(ws[1], 1):
-            col_letter = openpyxl.utils.get_column_letter(i)
-            header_value = cell.value
-            if isinstance(header_value, (int, float)):
-                header_value = str(int(header_value))
-            self.columns.append({
-                'letter': col_letter,
-                'name': header_value or f'列{i}',
-                'suggested': suggest_field_type(header_value)
-            })
+    def load_from_excel(self, filepath, sheet_name=None):
+        wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
+        ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+        rows = list(ws.iter_rows(values_only=True))
         wb.close()
+        if not rows:
+            return
+        self.headers = [str(h).strip() if h else f"列{i+1}" for i, h in enumerate(rows[0])]
+        self.data = rows[1:]
+        self._col_cache = {}
 
-    def set_mapping(self, letter, field_type):
-        for existing_letter, existing_type in list(self.mapping.items()):
-            if existing_type == 'key' and field_type != 'key' and letter != existing_letter:
-                pass
-            if existing_type == field_type and letter != existing_letter:
-                if messagebox.askyesno("确认", f"'{FIELD_TYPES[existing_type]}' 已分配给其他列，是否更换？"):
-                    del self.mapping[existing_letter]
-                    break
-                else:
-                    return False
-        self.mapping[letter] = field_type
-        return True
+    def set_mapping(self, field, col_index):
+        self.mapping[field] = col_index
+        self._col_cache.pop(field, None)
 
     def get_key_column(self):
-        for letter, type_ in self.mapping.items():
-            if type_ == 'key':
-                return letter
-        return None
+        for field in ("id", "email", "name"):
+            if field in self.mapping:
+                return self.mapping[field]
+        return 0
 
-    def get_column_index(self, letter):
-        if not letter:
-            return -1
-        col_idx = openpyxl.utils.column_index_from_string(letter)
-        return col_idx - 1
+    def get_key_field_name(self):
+        for field in ("id", "email", "name"):
+            if field in self.mapping:
+                return field
+        return "id"
 
-    def get_data_for_field(self, row_data, field_type):
-        if field_type not in self.mapping:
-            return ''
-        letter = None
-        for ltr, typ in self.mapping.items():
-            if typ == field_type:
-                letter = ltr
-                break
-        if not letter:
-            return ''
-        col_idx = self.get_column_index(letter)
-        if col_idx < 0 or col_idx >= len(row_data):
-            return ''
-        value = row_data[col_idx]
-        if isinstance(value, (int, float)):
-            value = str(int(value))
-        return value.strip() if value else ''
+    def get_column_index(self, field):
+        return self.mapping.get(field, -1)
+
+    def get_data_for_field(self, field):
+        if field in self._col_cache:
+            return self._col_cache[field]
+        idx = self.get_column_index(field)
+        if idx < 0:
+            return []
+        values = []
+        for row in self.data:
+            if idx < len(row) and row[idx] is not None:
+                values.append(str(row[idx]).strip())
+            else:
+                values.append("")
+        self._col_cache[field] = values
+        return values
 
 
 class RecipientMatcher:
-    def __init__(self, excel_path, column_mapping):
-        self.excel_path = excel_path
+    def __init__(self, folder_path, column_mapping, key_field="id"):
+        self.folder_path = folder_path
         self.column_mapping = column_mapping
-        self.recipients = []
+        self.key_field = key_field
+        self._key_index = {}
         self._load_recipients()
 
     def _load_recipients(self):
-        wb = openpyxl.load_workbook(self.excel_path)
-        ws = wb.active
-
-        key_col = self.column_mapping.get_key_column()
-        if not key_col:
-            raise ValueError("请先设置关键字段列")
-
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            key = self.column_mapping.get_data_for_field(row, 'key')
-            name = self.column_mapping.get_data_for_field(row, 'name')
-            email = self.column_mapping.get_data_for_field(row, 'email')
-
-            if key:
-                self.recipients.append({
-                    'key': key,
-                    'name': name,
-                    'email': email,
-                    'raw_data': row
-                })
-        wb.close()
+        key_idx = self.column_mapping.get_column_index(self.key_field)
+        if key_idx < 0:
+            return
+        for i, row in enumerate(self.column_mapping.data):
+            if key_idx < len(row) and row[key_idx] is not None:
+                raw = str(row[key_idx]).strip()
+                if "." in raw and raw.replace(".", "").isdigit():
+                    raw = raw.split(".")[0]
+                self._key_index[raw] = i
 
     def find_by_key(self, key):
-        for r in self.recipients:
-            if r['key'] == key:
-                return r
-        return None
+        return self._key_index.get(key)
 
-    def match_files(self, folder_path):
+    def match_files(self):
         results = []
-        if not os.path.exists(folder_path):
+        if not os.path.isdir(self.folder_path):
             return results
-
-        for filename in os.listdir(folder_path):
-            if os.path.isfile(os.path.join(folder_path, filename)):
-                key = extract_key_from_filename(filename)
-                if not key:
-                    results.append({
-                        'file': filename,
-                        'filepath': os.path.join(folder_path, filename),
-                        'status': 'invalid_filename',
-                        'error': '文件名不符合格式（应为数字开头）'
-                    })
-                    continue
-
-                recipient = self.find_by_key(key)
-                if recipient:
-                    results.append({
-                        'file': filename,
-                        'filepath': os.path.join(folder_path, filename),
-                        'status': 'matched',
-                        'recipient': recipient
-                    })
-                else:
-                    results.append({
-                        'file': filename,
-                        'filepath': os.path.join(folder_path, filename),
-                        'status': 'not_found',
-                        'key': key,
-                        'error': f'学号 {key} 在Excel中未找到'
-                    })
+        for fn in sorted(os.listdir(self.folder_path)):
+            fp = os.path.join(self.folder_path, fn)
+            if not os.path.isfile(fp):
+                continue
+            key = extract_key_from_filename(fn)
+            if key is None:
+                continue
+            row_idx = self.find_by_key(key)
+            info = {"filename": fn, "filepath": fp, "key": key, "row_idx": row_idx, "matched": row_idx is not None}
+            results.append(info)
         return results
 
 
 class EmailSenderGUI:
     def __init__(self):
-        if USE_CUSTOMTK:
-            ctk.set_appearance_mode("light")
-            ctk.set_default_color_theme("blue")
-
-        self.root = tk.Tk() if not USE_CUSTOMTK else ctk.CTk()
-        self.root.title("批量发送邮件工具")
+        self.root = ctk.CTk() if USE_CUSTOMTK else tk.Tk()
+        self.root.title("批量邮件发送工具")
         self.root.geometry("900x700")
-
-        self.current_step = 1
-        self.folder_path = ""
-        self.excel_path = ""
-        self.column_mapping = ColumnMapping()
-        self.recipient_matcher = None
-        self.match_results = []
-        self.sending = False
-        self.paused = False
-        self.stop_event = threading.Event()
-
-        self.smtp_config = {
-            'server': '',
-            'port': 587,
-            'email': '',
-            'password': '',
-            'use_tls': True
-        }
-
-        self.send_interval = 3
-        self.max_retries = 3
-
-        # Tab键导航支持
-        def move_focus_on_tab(event):
-            event.widget.tk_focusNext().focus_set()
-            return 'break'
-
-        self._move_focus_on_tab = move_focus_on_tab
-
-        self.setup_responsive_ui()
-
-    def get_screen_size(self):
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        return screen_width, screen_height
-
-    def setup_responsive_ui(self):
-        screen_width, screen_height = self.get_screen_size()
-        
-        min_width = min(900, screen_width - 50)
-        min_height = min(700, screen_height - 100)
-        
         self.root.minsize(800, 600)
-        
-        if screen_width < 900 or screen_height < 700:
-            base_geometry = f"{screen_width - 50}x{screen_height - 100}"
-            self.root.geometry(base_geometry)
-        else:
-            self.root.geometry("900x700")
-        
-        container = tk.Frame(self.root) if not USE_CUSTOMTK else ctk.CTkFrame(self.root)
-        container.pack(fill='both', expand=True)
-        
-        if screen_width < 900 or screen_height < 700:
-            self.canvas = tk.Canvas(container) if not USE_CUSTOMTK else None
-            scrollbar_y = tk.Scrollbar(container, orient='vertical', command=self.canvas.yview) if not USE_CUSTOMTK else None
-            scrollbar_x = tk.Scrollbar(container, orient='horizontal', command=self.canvas.xview) if not USE_CUSTOMTK else None
-            
-            if not USE_CUSTOMTK and self.canvas:
-                self.canvas.configure(xscrollcommand=scrollbar_x.set, yscrollcommand=scrollbar_y.set)
-                
-                def on_frame_configure(event):
-                    self.canvas.configure(scrollregion=self.canvas.bbox('all'))
-                
-                self.main_frame = tk.Frame(self.canvas) if not USE_CUSTOMTK else None
-                self.canvas.create_window((0, 0), window=self.main_frame, anchor='nw')
-                self.main_frame.bind("<Configure>", on_frame_configure)
-                
-                self.canvas.pack(side='left', fill='both', expand=True)
-                scrollbar_y.pack(side='right', fill='y')
-                scrollbar_x.pack(side='bottom', fill='x')
-            else:
-                self.main_frame = container
-        else:
-            self.main_frame = container
-
-        self.setup_ui()
-
-    def setup_ui(self):
-        main_frame = tk.Frame(self.main_frame) if not USE_CUSTOMTK else ctk.CTkFrame(self.main_frame)
-        main_frame.pack(fill='both', expand=True, padx=10, pady=10)
-
-        step_frame = tk.Frame(main_frame) if not USE_CUSTOMTK else ctk.CTkFrame(main_frame, height=60)
-        step_frame.pack(fill='x', pady=(0, 10))
-        step_frame.pack_propagate(False) if USE_CUSTOMTK else None
-
+        self.root.configure(fg_color=BG if USE_CUSTOMTK else BG)
+        self._configure_dpi()
+        self.current_step = 0
+        self.step_frames = []
         self.step_buttons = []
-        steps = ['1.数据配置', '2.邮件内容', '3.发送设置', '4.发送预览']
-        for i, step_text in enumerate(steps, 1):
-            btn = tk.Button(step_frame, text=step_text, command=lambda idx=i: self.go_to_step(idx),
-                          width=12, height=2) if not USE_CUSTOMTK else ctk.CTkButton(
-                step_frame, text=step_text, command=lambda idx=i: self.go_to_step(idx), width=12, height=40)
-            btn.pack(side='left', padx=5)
-            self.step_buttons.append(btn)
-
-        self.content_frame = tk.Frame(main_frame) if not USE_CUSTOMTK else ctk.CTkFrame(main_frame)
-        self.content_frame.pack(fill='both', expand=True)
-
-        self.step1_frame = None
-        self.step2_frame = None
-        self.step3_frame = None
-        self.step4_frame = None
-
-        btn_frame = tk.Frame(main_frame) if not USE_CUSTOMTK else ctk.CTkFrame(main_frame, height=50)
-        btn_frame.pack(fill='x', pady=(10, 0))
-        btn_frame.pack_propagate(False) if USE_CUSTOMTK else None
-
-        self.btn_prev = tk.Button(btn_frame, text="上一步", command=self.prev_step, width=10) if not USE_CUSTOMTK else ctk.CTkButton(
-            btn_frame, text="上一步", command=self.prev_step, width=10)
-        self.btn_prev.pack(side='left', padx=5)
-        self.btn_prev.pack_forget()
-
-        self.btn_next = tk.Button(btn_frame, text="下一步", command=self.next_step, width=10) if not USE_CUSTOMTK else ctk.CTkButton(
-            btn_frame, text="下一步", command=self.next_step, width=10)
-        self.btn_next.pack(side='left', padx=5)
-
-        self.btn_send = tk.Button(btn_frame, text="开始发送", command=self.start_send, width=12,
-                               bg='green', fg='white') if not USE_CUSTOMTK else ctk.CTkButton(
-            btn_frame, text="开始发送", command=self.start_send, width=12, fg_color='green', hover_color='darkgreen')
-        self.btn_send.pack(side='left', padx=5)
-        self.btn_send.pack_forget()
-
-        self.create_step1()
-        self.create_step2()
-        self.create_step3()
-        self.create_step4()
-
-        self.show_step(1)
-
-        # 键盘导航支持
-        self.root.bind('<Control-Return>', lambda e: self.start_send() if self.current_step == 4 else None)
-        self.root.bind('<Control-q>', lambda e: self.on_closing())
-        self.root.bind('<Escape>', lambda e: None)
-
+        self.folder_path = tk.StringVar(value="")
+        self.excel_path = tk.StringVar(value="")
+        self.smtp_server = tk.StringVar(value="smtp.gmail.com")
+        self.smtp_port = tk.IntVar(value=587)
+        self.use_tls = tk.BooleanVar(value=True)
+        self.sender_email = tk.StringVar(value="")
+        self.sender_password = tk.StringVar(value="")
+        self.send_interval = tk.DoubleVar(value=3.0)
+        self.max_retries = tk.IntVar(value=3)
+        self.retry_interval = tk.IntVar(value=10)
+        self.subject_var = tk.StringVar(value="")
+        self.body_widget = None
+        self.log_widget = None
+        self.progress_bar = None
+        self.progress_label = None
+        self.column_mapping = ColumnMapping()
+        self.mapping_widgets = {}
+        self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.pause_event.set()
+        self.is_sending = False
+        self.send_thread = None
+        self.total_count = 0
+        self.success_count = 0
+        self.fail_count = 0
+        self.failed_records = []
+        self.custom_vars = []
+        self.custom_var_container = None
+        self.custom_var_subject_container = None
+        self.custom_var_body_container = None
+        self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-    def create_step1(self):
-        self.step1_frame = tk.Frame(self.content_frame) if not USE_CUSTOMTK else ctk.CTkFrame(self.content_frame)
-
-        tk.Label(self.step1_frame, text="步骤1: 数据配置", font=('Arial', 14, 'bold')).pack(anchor='w', pady=(0, 15))
-
-        tk.Label(self.step1_frame, text="附件文件夹:").pack(anchor='w')
-        folder_frame = tk.Frame(self.step1_frame) if not USE_CUSTOMTK else ctk.CTkFrame(self.step1_frame)
-        folder_frame.pack(fill='x', pady=(5, 10))
-        self.entry_folder = tk.Entry(folder_frame, width=60) if not USE_CUSTOMTK else ctk.CTkEntry(folder_frame, width=60)
-        self.entry_folder.pack(side='left', fill='x', expand=True)
-        tk.Button(folder_frame, text="浏览...", command=self.browse_folder, width=8).pack(side='left', padx=(5, 0)) if not USE_CUSTOMTK else ctk.CTkButton(
-            folder_frame, text="浏览...", command=self.browse_folder, width=8).pack(side='left', padx=(5, 0))
-
-        tk.Label(self.step1_frame, text="Excel文件:").pack(anchor='w')
-        excel_frame = tk.Frame(self.step1_frame) if not USE_CUSTOMTK else ctk.CTkFrame(self.step1_frame)
-        excel_frame.pack(fill='x', pady=(5, 10))
-        self.entry_excel = tk.Entry(excel_frame, width=60) if not USE_CUSTOMTK else ctk.CTkEntry(excel_frame, width=60)
-        self.entry_excel.pack(side='left', fill='x', expand=True)
-        tk.Button(excel_frame, text="浏览...", command=self.browse_excel, width=8).pack(side='left', padx=(5, 0)) if not USE_CUSTOMTK else ctk.CTkButton(
-            excel_frame, text="浏览...", command=self.browse_excel, width=8).pack(side='left', padx=(5, 0))
-
-        sep = tk.Frame(self.step1_frame, height=2, bd=1, relief='sunken') if not USE_CUSTOMTK else ctk.CTkFrame(self.step1_frame, height=2)
-        sep.pack(fill='x', pady=15)
-
-        tk.Label(self.step1_frame, text="列映射配置（请为每列选择用途）:").pack(anchor='w')
-        tk.Label(self.step1_frame, text="提示：关键字段用于匹配文件名中的编号", fg='gray').pack(anchor='w')
-
-        self.mapping_frame = tk.Frame(self.step1_frame) if not USE_CUSTOMTK else ctk.CTkScrollableFrame(self.step1_frame, height=200)
-        self.mapping_frame.pack(fill='both', expand=True, pady=10)
-
-        self.mapping_widgets = []
-
-        sep2 = tk.Frame(self.step1_frame, height=2, bd=1, relief='sunken') if not USE_CUSTOMTK else ctk.CTkFrame(self.step1_frame, height=2)
-        sep2.pack(fill='x', pady=15)
-
-        tk.Label(self.step1_frame, text="匹配预览:").pack(anchor='w')
-
-        self.preview_frame = tk.Frame(self.step1_frame) if not USE_CUSTOMTK else ctk.CTkScrollableFrame(self.step1_frame, height=150)
-        self.preview_frame.pack(fill='both', expand=True, pady=5)
-
-        self.btn_load_preview = tk.Button(self.step1_frame, text="加载预览", command=self.load_preview,
-                                       bg=get_color('lightblue')) if not USE_CUSTOMTK else ctk.CTkButton(
-            self.step1_frame, text="加载预览", command=self.load_preview, fg_color=get_color('lightblue'), text_color='black')
-        self.btn_load_preview.pack(pady=5)
-        
-        self.preview_hint_label = tk.Label(self.step1_frame, text="[!] 重要：必须点击'加载预览'确保有匹配收件人后才能继续！",
-                                          fg=get_color('red'), font=('Arial', 9, 'bold'))
-        if not USE_CUSTOMTK:
-            self.preview_hint_label.pack(pady=(0, 5))
-        else:
-            self.preview_hint_label.configure(text_color=get_color('red'))
-
-    def create_step2(self):
-        self.step2_frame = tk.Frame(self.content_frame) if not USE_CUSTOMTK else ctk.CTkFrame(self.content_frame)
-
-        tk.Label(self.step2_frame, text="步骤2: 邮件内容", font=('Arial', 14, 'bold')).pack(anchor='w', pady=(0, 15))
-
-        tk.Label(self.step2_frame, text="邮件主题:").pack(anchor='w')
-        self.entry_subject = tk.Entry(self.step2_frame, width=70) if not USE_CUSTOMTK else ctk.CTkEntry(self.step2_frame, width=70)
-        self.entry_subject.pack(fill='x', pady=(5, 5))
-        
-        tk.Label(self.step2_frame, text="主题变量:", font=('Arial', 9)).pack(anchor='w')
-        subject_var_frame = tk.Frame(self.step2_frame) if not USE_CUSTOMTK else ctk.CTkFrame(self.step2_frame)
-        subject_var_frame.pack(pady=(2, 10))
-        self.btn_insert_subject_name = tk.Button(subject_var_frame, text="【姓名】", command=lambda: self.insert_var_to_subject('name'),
-                                               width=8).pack(side='left', padx=2)
-        self.btn_insert_subject_email = tk.Button(subject_var_frame, text="【邮箱】", command=lambda: self.insert_var_to_subject('email'),
-                                               width=8).pack(side='left', padx=2)
-
-        tk.Label(self.step2_frame, text="插入变量(正文):").pack(anchor='w')
-        var_frame = tk.Frame(self.step2_frame) if not USE_CUSTOMTK else ctk.CTkFrame(self.step2_frame)
-        var_frame.pack(pady=5)
-        self.btn_insert_key = tk.Button(var_frame, text="【姓名】", command=lambda: self.insert_var('name'),
-                                      width=8).pack(side='left', padx=2)
-        self.btn_insert_email = tk.Button(var_frame, text="【邮箱】", command=lambda: self.insert_var('email'),
-                                       width=8).pack(side='left', padx=2)
-
-        format_label_frame = tk.LabelFrame(self.step2_frame, text="文本格式化工具", padx=5, pady=5)
-        format_label_frame.pack(fill='x', pady=(10, 5))
-
-        # 第一行：对齐方式
-        align_toolbar = tk.Frame(format_label_frame) if not USE_CUSTOMTK else ctk.CTkFrame(format_label_frame)
-        align_toolbar.pack(fill='x', pady=2)
-
-        tk.Label(align_toolbar, text="对齐方式:").pack(side='left', padx=(0, 5))
-
-        self.btn_align_left = tk.Button(align_toolbar, text="左对齐", command=self.format_align_left,
-                                        width=8, relief='raised')
-        if not USE_CUSTOMTK:
-            self.btn_align_left.pack(side='left', padx=2)
-        else:
-            self.btn_align_left = ctk.CTkButton(align_toolbar, text="左对齐", command=self.format_align_left, width=8)
-            self.btn_align_left.pack(side='left', padx=2)
-
-        self.btn_align_right = tk.Button(align_toolbar, text="右对齐", command=self.format_align_right,
-                                         width=8, relief='raised')
-        if not USE_CUSTOMTK:
-            self.btn_align_right.pack(side='left', padx=2)
-        else:
-            self.btn_align_right = ctk.CTkButton(align_toolbar, text="右对齐", command=self.format_align_right, width=8)
-            self.btn_align_right.pack(side='left', padx=2)
-
-        # 第二行：样式
-        style_toolbar = tk.Frame(format_label_frame) if not USE_CUSTOMTK else ctk.CTkFrame(format_label_frame)
-        style_toolbar.pack(fill='x', pady=2)
-
-        tk.Label(style_toolbar, text="样式:").pack(side='left', padx=(0, 5))
-
-        self.btn_bold = tk.Button(style_toolbar, text="粗体", command=self.format_bold,
-                                  width=8, relief='raised')
-        if not USE_CUSTOMTK:
-            self.btn_bold.pack(side='left', padx=2)
-        else:
-            self.btn_bold = ctk.CTkButton(style_toolbar, text="粗体", command=self.format_bold, width=8)
-            self.btn_bold.pack(side='left', padx=2)
-
-        # 第三行：缩进和清除
-        indent_toolbar = tk.Frame(format_label_frame) if not USE_CUSTOMTK else ctk.CTkFrame(format_label_frame)
-        indent_toolbar.pack(fill='x', pady=2)
-
-        tk.Label(indent_toolbar, text="缩进:").pack(side='left', padx=(0, 5))
-
-        self.btn_indent = tk.Button(indent_toolbar, text="首行缩进", command=self.format_first_line_indent,
-                                    width=10, relief='raised')
-        if not USE_CUSTOMTK:
-            self.btn_indent.pack(side='left', padx=2)
-        else:
-            self.btn_indent = ctk.CTkButton(indent_toolbar, text="首行缩进", command=self.format_first_line_indent, width=10)
-            self.btn_indent.pack(side='left', padx=2)
-
-        self.btn_clear_format = tk.Button(indent_toolbar, text="清除格式", command=self.clear_formatting,
-                                          width=10, relief='raised')
-        if not USE_CUSTOMTK:
-            self.btn_clear_format.pack(side='left', padx=2)
-        else:
-            self.btn_clear_format = ctk.CTkButton(indent_toolbar, text="清除格式", command=self.clear_formatting, width=10)
-            self.btn_clear_format.pack(side='left', padx=2)
-
-        tk.Label(self.step2_frame, text="邮件正文:").pack(anchor='w', pady=(10, 0))
-        
-        text_frame = tk.Frame(self.step2_frame) if not USE_CUSTOMTK else ctk.CTkFrame(self.step2_frame)
-        text_frame.pack(fill='both', expand=True, pady=5)
-        
-        self.text_body = scrolledtext.ScrolledText(text_frame, width=80, height=15,
-                                                font=('Courier', 10)) if not USE_CUSTOMTK else ctk.CTkTextbox(
-            text_frame, width=80, height=15, font=('Courier', 10))
-        self.text_body.pack(fill='both', expand=True)
-
-        # Tab键导航支持：文本区域按Tab移动焦点
-        self.text_body.bind('<Tab>', self._move_focus_on_tab)
-        if USE_CUSTOMTK:
-            self.text_body.bind('<Tab>', self._move_focus_on_tab)
-
-        self.text_body.tag_configure('bold', font=('Courier', 10, 'bold'))
-        self.text_body.tag_configure('left_align', justify='left')
-        self.text_body.tag_configure('right_align', justify='right')
-        self.text_body.tag_configure('indented', lmargin1=40, lmargin2=40)
-
-        self.default_body = """您好，【姓名】同学：
-
-您好！附件中是您的学习资料，请查收。
-
-如有疑问，请随时联系我们。
-
-祝学习顺利！"""
-
-        if not USE_CUSTOMTK:
-            self.text_body.insert('1.0', self.default_body)
-        else:
-            self.text_body.insert('1.0', self.default_body)
-
-    def create_step3(self):
-        self.step3_frame = tk.Frame(self.content_frame) if not USE_CUSTOMTK else ctk.CTkFrame(self.content_frame)
-
-        tk.Label(self.step3_frame, text="步骤3: 发送设置", font=('Arial', 14, 'bold')).pack(anchor='w', pady=(0, 15))
-
-        config_frame = tk.LabelFrame(self.step3_frame, text="SMTP配置", padx=10, pady=10)
-        config_frame.pack(fill='x', pady=(0, 15))
-
-        row1 = tk.Frame(config_frame)
-        row1.pack(fill='x', pady=5)
-        tk.Label(row1, text="服务器:", width=10, anchor='w').pack(side='left')
-        self.entry_server = tk.Entry(row1, width=40) if not USE_CUSTOMTK else ctk.CTkEntry(row1, width=40)
-        self.entry_server.pack(side='left', fill='x', expand=True)
-        self.entry_server.insert(0, 'smtp.example.com')
-
-        row2 = tk.Frame(config_frame)
-        row2.pack(fill='x', pady=5)
-        tk.Label(row2, text="端口:", width=10, anchor='w').pack(side='left')
-        self.entry_port = tk.Entry(row2, width=15) if not USE_CUSTOMTK else ctk.CTkEntry(row2, width=15)
-        self.entry_port.pack(side='left')
-        self.entry_port.insert(0, '587')
-        self.var_tls = tk.BooleanVar(value=True)
-        tk.Checkbutton(row2, text="使用TLS", variable=self.var_tls).pack(side='left', padx=20)
-
-        row3 = tk.Frame(config_frame)
-        row3.pack(fill='x', pady=5)
-        tk.Label(row3, text="邮箱:", width=10, anchor='w').pack(side='left')
-        self.entry_sender = tk.Entry(row3, width=40) if not USE_CUSTOMTK else ctk.CTkEntry(row3, width=40)
-        self.entry_sender.pack(side='left', fill='x', expand=True)
-
-        row4 = tk.Frame(config_frame)
-        row4.pack(fill='x', pady=5)
-        tk.Label(row4, text="授权码:", width=10, anchor='w').pack(side='left')
-        self.entry_auth = tk.Entry(row4, width=40, show='*') if not USE_CUSTOMTK else ctk.CTkEntry(row4, width=40, show='*')
-        self.entry_auth.pack(side='left', fill='x', expand=True)
-
-        tk.Button(config_frame, text="测试连接", command=self.test_connection,
-                 bg='lightgreen').pack(pady=10)
-
-        options_frame = tk.LabelFrame(self.step3_frame, text="发送选项", padx=10, pady=10)
-        options_frame.pack(fill='x')
-
-        row5 = tk.Frame(options_frame)
-        row5.pack(fill='x', pady=5)
-        tk.Label(row5, text="发送间隔:", width=10, anchor='w').pack(side='left')
-        if not USE_CUSTOMTK:
-            self.var_interval = tk.StringVar(value='3')
-            vcmd_interval = (self.root.register(self.validate_interval), '%P')
-            self.entry_interval = tk.Entry(row5, width=10, textvariable=self.var_interval, validate='key', validatecommand=vcmd_interval)
-            self.entry_interval.pack(side='left')
-            self.var_interval.trace_add('write', self.on_interval_change)
-        else:
-            self.entry_interval = ctk.CTkEntry(row5, width=10)
-            self.entry_interval.pack(side='left')
-            self.entry_interval.insert(0, '3')
-            self.entry_interval.bind('<KeyRelease>', self.on_ctk_interval_change)
-        tk.Label(row5, text="秒（建议3秒以上）").pack(side='left', padx=10)
-
-        row6 = tk.Frame(options_frame)
-        row6.pack(fill='x', pady=5)
-        tk.Label(row6, text="最大重试:", width=10, anchor='w').pack(side='left')
-        if not USE_CUSTOMTK:
-            self.var_retries = tk.StringVar(value='3')
-            vcmd_retries = (self.root.register(self.validate_retries), '%P')
-            self.entry_retries = tk.Entry(row6, width=10, textvariable=self.var_retries, validate='key', validatecommand=vcmd_retries)
-            self.entry_retries.pack(side='left')
-            self.var_retries.trace_add('write', self.on_retries_change)
-        else:
-            self.entry_retries = ctk.CTkEntry(row6, width=10)
-            self.entry_retries.pack(side='left')
-            self.entry_retries.insert(0, '3')
-            self.entry_retries.bind('<KeyRelease>', self.on_ctk_retries_change)
-        tk.Label(row6, text="次").pack(side='left', padx=10)
-
-    def create_step4(self):
-        self.step4_frame = tk.Frame(self.content_frame) if not USE_CUSTOMTK else ctk.CTkFrame(self.content_frame)
-
-        tk.Label(self.step4_frame, text="步骤4: 发送预览与执行", font=('Arial', 14, 'bold')).pack(anchor='w', pady=(0, 15))
-
-        self.label_stats = tk.Label(self.step4_frame, text="总计: 0  成功: 0  失败: 0",
-                                  font=('Arial', 12))
-        self.label_stats.pack(anchor='w')
-
-        self.progress_bar = ttk.Progressbar(self.step4_frame, mode='determinate')
-        self.progress_bar.pack(fill='x', pady=10)
-
-        log_frame = tk.LabelFrame(self.step4_frame, text="发送日志", padx=5, pady=5)
-        log_frame.pack(fill='both', expand=True)
-        
-        log_text_frame = tk.Frame(log_frame) if not USE_CUSTOMTK else ctk.CTkFrame(log_frame)
-        log_text_frame.pack(fill='both', expand=True)
-        
-        self.text_log = scrolledtext.ScrolledText(log_text_frame, width=80, height=20,
-                                                     font=('Courier', 9))
-        self.text_log.pack(fill='both', expand=True)
-        self.text_log.bind('<Tab>', self._move_focus_on_tab)
-
-        btn_log_frame = tk.Frame(self.step4_frame)
-        btn_log_frame.pack(pady=10)
-
-        self.btn_pause = tk.Button(btn_log_frame, text="暂停", command=self.toggle_pause,
-                                  width=10, state='disabled') if not USE_CUSTOMTK else ctk.CTkButton(
-            btn_log_frame, text="暂停", command=self.toggle_pause, width=10, state='disabled')
-        self.btn_pause.pack(side='left', padx=5)
-
-        self.btn_stop = tk.Button(btn_log_frame, text="停止", command=self.stop_send,
-                                 width=10, state='disabled', bg='red', fg='white') if not USE_CUSTOMTK else ctk.CTkButton(
-            btn_log_frame, text="停止", command=self.stop_send, width=10, state='disabled', fg_color='red')
-        self.btn_stop.pack(side='left', padx=5)
-
-        self.btn_export = tk.Button(btn_log_frame, text="导出失败记录", command=self.export_failed,
-                                   width=12) if not USE_CUSTOMTK else ctk.CTkButton(
-            btn_log_frame, text="导出失败记录", command=self.export_failed, width=12)
-        self.btn_export.pack(side='left', padx=5)
-
-    def browse_folder(self):
-        folder = filedialog.askdirectory(title="选择附件文件夹")
-        if folder:
-            self.folder_path = folder
-            self.entry_folder.delete(0, 'end')
-            self.entry_folder.insert(0, folder)
-
-    def browse_excel(self):
-        file = filedialog.askopenfilename(title="选择Excel文件",
-                                          filetypes=[("Excel文件", "*.xlsx *.xls"), ("所有文件", "*.*")])
-        if file:
-            self.excel_path = file
-            self.entry_excel.delete(0, 'end')
-            self.entry_excel.insert(0, file)
-            self.load_columns()
-
-    def load_columns(self):
-        for widget in self.mapping_widgets:
-            widget.destroy()
-        self.mapping_widgets = []
-
-        if not self.excel_path:
-            return
-
+    def _configure_dpi(self):
         try:
-            self.column_mapping.load_from_excel(self.excel_path)
-
-            for col_info in self.column_mapping.columns:
-                row = tk.Frame(self.mapping_frame) if not USE_CUSTOMTK else ctk.CTkFrame(self.mapping_frame)
-                row.pack(fill='x', pady=2)
-                self.mapping_widgets.append(row)
-
-                letter = col_info['letter']
-                name = col_info['name']
-                suggested = col_info['suggested']
-
-                tk.Label(row, text=f"{letter} - {name}", width=20, anchor='w').pack(side='left')
-
-                var = tk.StringVar(value=suggested)
-                combo = ttk.Combobox(row, values=FIELD_TYPE_KEYS, textvariable=var,
-                                    width=15, state='readonly')
-                combo.pack(side='left', padx=10)
-                self.mapping_widgets.append(combo)
-
-                def on_change(event, letter=letter, var=var):
-                    self.column_mapping.set_mapping(letter, var.get())
-                combo.bind('<<ComboboxSelected>>', on_change)
-
-                self.column_mapping.mapping[letter] = suggested
-
-        except Exception as e:
-            messagebox.showerror("错误", f"读取Excel失败: {str(e)}")
-
-    def load_preview(self):
-        self.btn_load_preview.config(state='disabled', text='加载中...')
-        self.btn_load_preview.update_idletasks()
-        for widget in self.preview_frame.winfo_children():
-            widget.destroy()
-
-        if not self.excel_path or not self.folder_path:
-            self.btn_load_preview.config(state='normal', text='加载预览')
-            messagebox.showwarning("警告", "请先选择Excel文件和附件文件夹")
-            return
-
-        try:
-            self.column_mapping.load_from_excel(self.excel_path)
-            self.recipient_matcher = RecipientMatcher(self.excel_path, self.column_mapping)
-            self.match_results = self.recipient_matcher.match_files(self.folder_path)
-
-            headers = ['附件文件', '收件人', '状态']
-            header_row = tk.Frame(self.preview_frame) if not USE_CUSTOMTK else ctk.CTkFrame(self.preview_frame)
-            header_row.pack(fill='x')
-            for h in headers:
-                tk.Label(header_row, text=h, anchor='w', font=('Arial', 9, 'bold')).pack(side='left', padx=5, fill='x', expand=True)
-
-            matched = 0
-            not_found = 0
-            invalid = 0
-
-            for result in self.match_results:
-                row = tk.Frame(self.preview_frame) if not USE_CUSTOMTK else ctk.CTkFrame(self.preview_frame)
-                row.pack(fill='x')
-
-                status = result['status']
-                if status == 'matched':
-                    matched += 1
-                    recipient = result['recipient']
-                    status_text = f"{recipient['name']} <{recipient['email']}> [OK]"
-                    color = 'green'
-                elif status == 'not_found':
-                    not_found += 1
-                    status_text = result['error']
-                    color = 'orange'
-                else:
-                    invalid += 1
-                    status_text = result['error']
-                    color = 'red'
-
-                tk.Label(row, text=result['file'], anchor='w').pack(side='left', padx=5, fill='x', expand=True)
-
-                if status == 'matched':
-                    recipient = result['recipient']
-                    tk.Label(row, text=f"{recipient['name']} <{recipient['email']}>",
-                             anchor='w').pack(side='left', padx=5, fill='x', expand=True)
-                else:
-                    tk.Label(row, text="", anchor='w').pack(side='left', padx=5, fill='x', expand=True)
-
-                label_color = get_color(color)
-                if USE_CUSTOMTK:
-                    tk.Label(row, text=status_text, anchor='w').pack(side='left', padx=5, fill='x', expand=True)
-                    row.winfo_children()[-1].configure(text_color=label_color)
-                else:
-                    tk.Label(row, text=status_text, fg=label_color, anchor='w').pack(side='left', padx=5, fill='x', expand=True)
-
-            summary = f"总计: {len(self.match_results)}  匹配成功: {matched}  未找到: {not_found}  无效: {invalid}"
-            summary_label = tk.Label(self.preview_frame, text=summary, font=('Arial', 9, 'bold'),
-            fg=get_color('blue') if not USE_CUSTOMTK else 'black')
-            summary_label.pack(pady=5)
-            
-            if matched > 0:
-                self.preview_hint_label.config(text=f"[OK] 预览已加载！找到 {matched} 个匹配收件人，可以继续操作",
-                                             fg=get_color('green'))
-                if not USE_CUSTOMTK:
-                    self.preview_hint_label.config(fg=get_color('green'))
-                else:
-                    self.preview_hint_label.configure(text_color=get_color('green'))
-            else:
-                self.preview_hint_label.config(text="[!] 没有找到匹配的收件人！请检查文件名和Excel数据",
-                                             fg=get_color('orange'))
-                if not USE_CUSTOMTK:
-                    self.preview_hint_label.config(fg=get_color('orange'))
-                else:
-                    self.preview_hint_label.configure(text_color=get_color('orange'))
-
-            self.btn_load_preview.config(state='normal', text='加载预览')
-        except Exception as e:
-            self.btn_load_preview.config(state='normal', text='加载预览')
-            messagebox.showerror("错误", f"预览失败: {str(e)}")
-
-    def insert_var(self, var_type):
-        var_map = {'name': '【姓名】', 'email': '【邮箱】'}
-        var_text = var_map.get(var_type, '【】')
-
-        try:
-            if not USE_CUSTOMTK:
-                self.text_body.insert('insert', var_text)
-            else:
-                self.text_body.insert('insert', var_text)
-        except Exception as e:
-            logging.error(f"insert_var error: {e}")
-
-    def insert_var_to_subject(self, var_type):
-        var_map = {'name': '【姓名】', 'email': '【邮箱】'}
-        var_text = var_map.get(var_type, '【】')
-
-        try:
-            current_pos = self.entry_subject.index('insert')
-            if current_pos == 'end':
-                current_pos = len(self.entry_subject.get())
-            self.entry_subject.insert(current_pos, var_text)
-        except Exception as e:
-            logging.error(f"insert_var_to_subject error: {e}")
-
-    def format_align_left(self):
-        try:
-            if self.text_body.tag_ranges('sel'):
-                start, end = self.text_body.tag_ranges('sel')
-                self.text_body.tag_remove('right_align', start, end)
-                self.text_body.tag_add('left_align', start, end)
-            else:
-                current_line = self.text_body.index('insert')
-                line_start = current_line.split('.')[0] + '.0'
-                line_end = current_line.split('.')[0] + '.end'
-                self.text_body.tag_remove('right_align', line_start, line_end)
-                self.text_body.tag_add('left_align', line_start, line_end)
-        except Exception as e:
-            messagebox.showwarning("提示", "请选择要格式化的文本或光标所在行")
-
-    def format_align_right(self):
-        try:
-            if self.text_body.tag_ranges('sel'):
-                start, end = self.text_body.tag_ranges('sel')
-                self.text_body.tag_remove('left_align', start, end)
-                self.text_body.tag_add('right_align', start, end)
-            else:
-                current_line = self.text_body.index('insert')
-                line_start = current_line.split('.')[0] + '.0'
-                line_end = current_line.split('.')[0] + '.end'
-                self.text_body.tag_remove('left_align', line_start, line_end)
-                self.text_body.tag_add('right_align', line_start, line_end)
-        except Exception as e:
-            messagebox.showwarning("提示", "请选择要格式化的文本或光标所在行")
-
-    def format_bold(self):
-        try:
-            if self.text_body.tag_ranges('sel'):
-                start, end = self.text_body.tag_ranges('sel')
-                current_tags = self.text_body.tag_names(start)
-                if 'bold' in current_tags:
-                    self.text_body.tag_remove('bold', start, end)
-                else:
-                    self.text_body.tag_add('bold', start, end)
-            else:
-                messagebox.showwarning("提示", "请先选择要加粗的文本")
-        except Exception as e:
-            messagebox.showwarning("提示", "请先选择要加粗的文本")
-
-    def format_first_line_indent(self):
-        try:
-            if self.text_body.tag_ranges('sel'):
-                start, end = self.text_body.tag_ranges('sel')
-                current_tags = self.text_body.tag_names(start)
-                if 'indented' in current_tags:
-                    self.text_body.tag_remove('indented', start, end)
-                else:
-                    self.text_body.tag_add('indented', start, end)
-            else:
-                current_line = self.text_body.index('insert')
-                line_start = current_line.split('.')[0] + '.0'
-                line_end = current_line.split('.')[0] + '.end'
-                current_tags = self.text_body.tag_names(line_start)
-                if 'indented' in current_tags:
-                    self.text_body.tag_remove('indented', line_start, line_end)
-                else:
-                    self.text_body.tag_add('indented', line_start, line_end)
-        except Exception as e:
-            messagebox.showwarning("提示", "请选择要缩进的文本或光标所在行")
-
-    def clear_formatting(self):
-        try:
-            if self.text_body.tag_ranges('sel'):
-                start, end = self.text_body.tag_ranges('sel')
-                for tag in ['bold', 'left_align', 'right_align', 'indented']:
-                    self.text_body.tag_remove(tag, start, end)
-            else:
-                for tag in ['bold', 'left_align', 'right_align', 'indented']:
-                    self.text_body.tag_remove(tag, '1.0', 'end')
-                messagebox.showinfo("提示", "已清除所有格式")
-        except Exception as e:
+            from ctypes import windll
+            windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
             pass
 
-    def convert_to_html(self, text):
-        lines = text.split('\n')
-        html_lines = []
-        
-        for line in lines:
-            if not line.strip():
-                html_lines.append('<br>')
-                continue
-            
-            line_html = line
-            
-            bold_ranges = []
-            pos = '1.0'
-            while True:
-                next_range = self.text_body.tag_nextrange('bold', pos)
-                if not next_range:
-                    break
-                bold_ranges.append(next_range)
-                pos = next_range[1]
-            
-            align_right_ranges = []
-            pos = '1.0'
-            while True:
-                next_range = self.text_body.tag_nextrange('right_align', pos)
-                if not next_range:
-                    break
-                align_right_ranges.append(next_range)
-                pos = next_range[1]
-            
-            indent_ranges = []
-            pos = '1.0'
-            while True:
-                next_range = self.text_body.tag_nextrange('indented', pos)
-                if not next_range:
-                    break
-                indent_ranges.append(next_range)
-                pos = next_range[1]
-            
-            is_right_align = False
-            is_indented = False
-            
-            html_lines.append(f'<p style="text-align: right;">{line_html}</p>' if is_right_align else 
-                            f'<p style="text-indent: 2em;">{line_html}</p>' if is_indented else 
-                            f'<p>{line_html}</p>')
-        
-        return '\n'.join(html_lines)
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self):
+        self.nav_frame = self._create_nav_bar()
+        self.button_frame = self._create_bottom_buttons()
+        self.content_frame = self._create_content_area()
+        self._create_all_steps()
+        self.show_step(0)
 
-    def get_formatted_body_html(self):
-        full_text = self.text_body.get('1.0', 'end')
-        lines = full_text.split('\n')
-        html_parts = []
-        
-        for i, line in enumerate(lines):
-            if not line.strip():
-                html_parts.append('<br>')
-                continue
-            
-            line_start = f'{i+1}.0'
-            line_end = f'{i+1}.end'
-            
-            chars = list(line)
-            char_html = [''] * len(chars)
-            
-            bold_positions = set()
-            right_align_positions = set()
-            indent_positions = set()
-            
-            for j in range(len(chars)):
-                pos = f'{i+1}.{j}'
-                tags = self.text_body.tag_names(pos)
-                if 'bold' in tags:
-                    bold_positions.add(j)
-                if 'right_align' in tags:
-                    right_align_positions.add(j)
-                if 'indented' in tags:
-                    indent_positions.add(j)
-            
-            has_right_align = len(right_align_positions) > len(chars) // 2 if chars else False
-            has_indent = len(indent_positions) > len(chars) // 2 if chars else False
-            
-            result_line = ''
-            in_bold = False
-            for j, char in enumerate(chars):
-                is_bold = j in bold_positions
-                if is_bold and not in_bold:
-                    result_line += '<strong>'
-                    in_bold = True
-                elif not is_bold and in_bold:
-                    result_line += '</strong>'
-                    in_bold = False
-                result_line += char if char != '<' else '&lt;' if char != '>' else '&gt;'
-            
-            if in_bold:
-                result_line += '</strong>'
-            
-            style = ''
-            if has_right_align:
-                style = 'text-align: right;'
-            elif has_indent:
-                style = 'text-indent: 2em;'
-            
-            if style:
-                html_parts.append(f'<p style="{style}">{result_line}</p>')
-            else:
-                html_parts.append(f'<p>{result_line}</p>')
-        
-        return '\n'.join(html_parts)
-
-    def validate_interval(self, value):
-        if value == '':
-            return True
-        if value.isdigit():
-            return True
-        return False
-
-    def validate_retries(self, value):
-        if value == '':
-            return True
-        if value.isdigit():
-            return True
-        return False
-
-    def on_interval_change(self, *args):
-        value = self.var_interval.get()
-        if value and not value.isdigit():
-            self.var_interval.set(''.join(c for c in value if c.isdigit()))
-
-    def on_retries_change(self, *args):
-        value = self.var_retries.get()
-        if value and not value.isdigit():
-            self.var_retries.set(''.join(c for c in value if c.isdigit()))
-
-    def on_ctk_interval_change(self, event):
-        value = self.entry_interval.get()
-        if value and not value.isdigit():
-            self.entry_interval.delete(0, 'end')
-            self.entry_interval.insert(0, ''.join(c for c in value if c.isdigit()))
-
-    def on_ctk_retries_change(self, event):
-        value = self.entry_retries.get()
-        if value and not value.isdigit():
-            self.entry_retries.delete(0, 'end')
-            self.entry_retries.insert(0, ''.join(c for c in value if c.isdigit()))
-
-    def test_connection(self):
-        server = self.entry_server.get().strip()
-        port_str = self.entry_port.get().strip()
-        email = self.entry_sender.get().strip()
-        auth = self.entry_auth.get().strip()
-        use_tls = self.var_tls.get()
-
-        if not all([server, port_str, email, auth]):
-            messagebox.showwarning("警告", "请填写完整的SMTP配置")
-            return
-
-        try:
-            port = int(port_str)
-            if not (1 <= port <= 65535):
-                messagebox.showwarning("警告", "端口号必须在1-65535之间")
-                return
-        except ValueError:
-            messagebox.showerror("错误", "端口必须是数字")
-            return
-
-        self.log_message("正在测试连接...")
-
-        try:
-            if use_tls:
-                server_smtp = smtplib.SMTP(server, port, timeout=10)
-                server_smtp.starttls()
-            else:
-                server_smtp = smtplib.SMTP(server, port, timeout=10)
-
-            server_smtp.login(email, auth)
-            server_smtp.quit()
-
-            self.log_message("连接测试成功！")
-            messagebox.showinfo("成功", "SMTP连接测试成功！")
-
-            self.smtp_config = {
-                'server': server,
-                'port': port,
-                'email': email,
-                'password': auth,
-                'use_tls': use_tls
-            }
-
-        except smtplib.SMTPAuthenticationError:
-            self.log_message("认证失败，请检查邮箱和授权码")
-            messagebox.showerror("错误", "认证失败，请检查邮箱和授权码")
-        except Exception as e:
-            self.log_message(f"连接失败: {str(e)}")
-            messagebox.showerror("错误", f"连接失败: {str(e)}")
-
-    def show_step(self, step):
-        self.current_step = step
-
-        for i, btn in enumerate(self.step_buttons, 1):
-            if i == step:
-                if not USE_CUSTOMTK:
-                    btn.config(relief='sunken', bg='#4CAF50', fg='white')
-                else:
-                    btn.configure(fg_color='#2196F3', hover_color='#1976D2', text_color='white')
-            else:
-                if not USE_CUSTOMTK:
-                    btn.config(relief='raised', bg='SystemButtonFace', fg='black')
-                else:
-                    btn.configure(fg_color='#E0E0E0', hover_color='#BDBDBD', text_color='black')
-
-        for frame in [self.step1_frame, self.step2_frame, self.step3_frame, self.step4_frame]:
-            if frame:
-                frame.pack_forget()
-
-        current = [self.step1_frame, self.step2_frame, self.step3_frame, self.step4_frame][step - 1]
-        if current:
-            current.pack(fill='both', expand=True)
-
-        self.btn_prev.pack_forget() if step <= 1 else self.btn_prev.pack(side='left', padx=5)
-
-        if step < 4:
-            self.btn_next.pack(side='left', padx=5)
-            self.btn_send.pack_forget()
+    def _create_nav_bar(self):
+        if USE_CUSTOMTK:
+            frame = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=0, height=72)
         else:
-            self.btn_next.pack_forget()
-            self.btn_send.pack(side='left', padx=5)
+            frame = tk.Frame(self.root, bg=CARD, height=72)
+            frame.pack_propagate(False)
+        frame.pack(fill=X, side=TOP)
 
-    def go_to_step(self, step):
-        if step <= self.current_step or self.validate_step(self.current_step):
-            self.show_step(step)
+        if USE_CUSTOMTK:
+            title = ctk.CTkLabel(frame, text="批量邮件发送", font=(FONT_FAMILY, FONT_SIZE_TITLE, "bold"), text_color=PRIMARY)
+        else:
+            title = tk.Label(frame, text="批量邮件发送", font=(FONT_FAMILY, FONT_SIZE_TITLE, "bold"), fg=PRIMARY, bg=CARD)
+        title.pack(side=LEFT, padx=(24, 0), pady=12)
 
-    def validate_step(self, step):
-        if step == 1:
-            if not self.excel_path or not self.folder_path:
-                messagebox.showwarning("警告", "请先选择Excel文件和附件文件夹")
-                return False
-            if not self.column_mapping.get_key_column():
-                messagebox.showwarning("警告", "请设置关键字段列")
-                return False
-            matched_results = [r for r in self.match_results if r['status'] == 'matched']
-            if not matched_results:
-                messagebox.showwarning("警告", "请点击'加载预览'按钮，确保有收件人匹配成功！")
-                return False
-        elif step == 2:
-            subject = self.entry_subject.get().strip()
-            if not subject:
-                messagebox.showwarning("警告", "请填写邮件主题")
-                return False
-        elif step == 3:
-            if not self.smtp_config.get('password'):
-                messagebox.showwarning("警告", "请点击'测试连接'按钮，验证SMTP配置是否正确！")
-                return False
-        return True
+        steps_container = ctk.CTkFrame(frame, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(frame, bg=CARD)
+        steps_container.pack(side=RIGHT, padx=(0, 24), pady=12)
+
+        step_names = ["选择文件", "编辑邮件", "SMTP 设置", "发送邮件"]
+        self.step_buttons = []
+        for i, name in enumerate(step_names):
+            btn = self._create_step_button(steps_container, i, name)
+            self.step_buttons.append(btn)
+            if i < len(step_names) - 1:
+                if USE_CUSTOMTK:
+                    sep = ctk.CTkLabel(steps_container, text="—", text_color=TEXT_DISABLED, font=(FONT_FAMILY, 10))
+                else:
+                    sep = tk.Label(steps_container, text="—", fg=TEXT_DISABLED, bg=CARD, font=(FONT_FAMILY, 10))
+                sep.pack(side=LEFT, padx=4)
+        return frame
+
+    def _create_step_button(self, parent, index, label):
+        if USE_CUSTOMTK:
+            btn = ctk.CTkButton(
+                parent, text=f"{index+1}", width=36, height=36,
+                corner_radius=18, fg_color=TEXT_DISABLED, hover_color=PRIMARY_HOVER,
+                font=(FONT_FAMILY, FONT_SIZE_STEP_NUM, "bold"),
+                command=lambda: self.go_to_step(index)
+            )
+        else:
+            btn = tk.Button(
+                parent, text=f"{index+1}", width=3, height=1,
+                bg=TEXT_DISABLED, fg="white", font=(FONT_FAMILY, FONT_SIZE_STEP_NUM, "bold"),
+                relief="flat", activebackground=PRIMARY_HOVER, activeforeground="white",
+                command=lambda: self.go_to_step(index)
+            )
+        btn.pack(side=LEFT, padx=2)
+
+        if USE_CUSTOMTK:
+            lbl = ctk.CTkLabel(parent, text=label, font=(FONT_FAMILY, FONT_SIZE_STEP_LABEL), text_color=TEXT_SECONDARY)
+        else:
+            lbl = tk.Label(parent, text=label, font=(FONT_FAMILY, FONT_SIZE_STEP_LABEL), fg=TEXT_SECONDARY, bg=CARD)
+        lbl.pack(side=LEFT, padx=(2, 8))
+        btn._label_ref = lbl
+        return btn
+
+    def _update_step_buttons(self):
+        for i, btn in enumerate(self.step_buttons):
+            if i == self.current_step:
+                if USE_CUSTOMTK:
+                    btn.configure(fg_color=PRIMARY, text_color="white")
+                    btn._label_ref.configure(text_color=PRIMARY)
+                else:
+                    btn.configure(bg=PRIMARY, fg="white")
+                    btn._label_ref.configure(fg=PRIMARY)
+            elif i < self.current_step:
+                if USE_CUSTOMTK:
+                    btn.configure(fg_color=SUCCESS, text_color="white")
+                    btn._label_ref.configure(text_color=SUCCESS)
+                else:
+                    btn.configure(bg=SUCCESS, fg="white")
+                    btn._label_ref.configure(fg=SUCCESS)
+            else:
+                if USE_CUSTOMTK:
+                    btn.configure(fg_color=TEXT_DISABLED, text_color="white")
+                    btn._label_ref.configure(text_color=TEXT_SECONDARY)
+                else:
+                    btn.configure(bg=TEXT_DISABLED, fg="white")
+                    btn._label_ref.configure(fg=TEXT_SECONDARY)
+
+    def _create_content_area(self):
+        if USE_CUSTOMTK:
+            frame = ctk.CTkFrame(self.root, fg_color=BG, corner_radius=0)
+        else:
+            frame = tk.Frame(self.root, bg=BG)
+        frame.pack(fill=BOTH, expand=True, padx=0, pady=0)
+        return frame
+
+    def _create_bottom_buttons(self):
+        if USE_CUSTOMTK:
+            frame = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=0, height=64)
+        else:
+            frame = tk.Frame(self.root, bg=CARD, height=64)
+            frame.pack_propagate(False)
+        frame.pack(fill=X, side=BOTTOM)
+
+        inner = ctk.CTkFrame(frame, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(frame, bg=CARD)
+        inner.pack(fill=X, padx=24, pady=12)
+
+        if USE_CUSTOMTK:
+            self.prev_btn = ctk.CTkButton(inner, text="上一步", width=100, height=36, corner_radius=BORDER_RADIUS,
+                                          fg_color="transparent", border_width=1, border_color=INPUT_BORDER,
+                                          text_color=TEXT_PRIMARY, hover_color="#E8E8E8", font=(FONT_FAMILY, FONT_SIZE_BUTTON),
+                                          command=self.prev_step)
+        else:
+            self.prev_btn = tk.Button(inner, text="上一步", width=10, height=1, relief="flat",
+                                      bg=CARD, fg=TEXT_PRIMARY, font=(FONT_FAMILY, FONT_SIZE_BUTTON),
+                                      activebackground="#E8E8E8", command=self.prev_step)
+        self.prev_btn.pack(side=LEFT)
+
+        if USE_CUSTOMTK:
+            self.next_btn = ctk.CTkButton(inner, text="下一步", width=100, height=36, corner_radius=BORDER_RADIUS,
+                                          fg_color=PRIMARY, hover_color=PRIMARY_HOVER, text_color="white",
+                                          font=(FONT_FAMILY, FONT_SIZE_BUTTON), command=self.next_step)
+        else:
+            self.next_btn = tk.Button(inner, text="下一步", width=10, height=1, relief="flat",
+                                      bg=PRIMARY, fg="white", font=(FONT_FAMILY, FONT_SIZE_BUTTON),
+                                      activebackground=PRIMARY_HOVER, activeforeground="white", command=self.next_step)
+        self.next_btn.pack(side=RIGHT)
+
+        if USE_CUSTOMTK:
+            self.send_btn = ctk.CTkButton(inner, text="开始发送", width=120, height=36, corner_radius=BORDER_RADIUS,
+                                          fg_color=SUCCESS, hover_color=SUCCESS_HOVER, text_color="white",
+                                          font=(FONT_FAMILY, FONT_SIZE_BUTTON, "bold"), command=self.start_send)
+        else:
+            self.send_btn = tk.Button(inner, text="开始发送", width=12, height=1, relief="flat",
+                                      bg=SUCCESS, fg="white", font=(FONT_FAMILY, FONT_SIZE_BUTTON, "bold"),
+                                      activebackground=SUCCESS_HOVER, activeforeground="white", command=self.start_send)
+
+        return frame
+
+    # ----------------------------------------------------------- steps
+    def _create_all_steps(self):
+        self.step_frames = [self.create_step1(), self.create_step2(), self.create_step3(), self.create_step4()]
+
+    def create_step1(self):
+        if USE_CUSTOMTK:
+            frame = ctk.CTkFrame(self.content_frame, fg_color=BG)
+        else:
+            frame = tk.Frame(self.content_frame, bg=BG)
+        self._card(frame, "附件文件夹", self._build_step1_folder)
+        self._card(frame, "Excel 信息表", self._build_step1_excel)
+        self._card(frame, "列映射配置", self._build_step1_mapping)
+        self._card(frame, "匹配预览", self._build_step1_preview)
+        return frame
+
+    def _build_step1_folder(self, parent):
+        row = ctk.CTkFrame(parent, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(parent, bg=CARD)
+        row.pack(fill=X, pady=(0, 4))
+        if USE_CUSTOMTK:
+            entry = ctk.CTkEntry(row, textvariable=self.folder_path, placeholder_text="请选择包含附件的文件夹路径",
+                                 height=36, border_width=1, border_color=INPUT_BORDER, fg_color=INPUT_BG,
+                                 text_color=TEXT_PRIMARY, font=(FONT_FAMILY, FONT_SIZE_BODY))
+            entry.pack(side=LEFT, fill=X, expand=True, padx=(0, 8))
+            ctk.CTkButton(row, text="浏览…", width=80, height=36, corner_radius=BORDER_RADIUS,
+                          fg_color=PRIMARY, hover_color=PRIMARY_HOVER, text_color="white",
+                          font=(FONT_FAMILY, FONT_SIZE_BODY), command=self.browse_folder).pack(side=RIGHT)
+        else:
+            entry = tk.Entry(row, textvariable=self.folder_path, font=(FONT_FAMILY, FONT_SIZE_BODY), relief="flat",
+                             bg=INPUT_BG, fg=TEXT_PRIMARY, highlightthickness=1, highlightcolor=INPUT_FOCUS,
+                             highlightbackground=INPUT_BORDER)
+            entry.pack(side=LEFT, fill=X, expand=True, padx=(0, 8))
+            tk.Button(row, text="浏览…", bg=PRIMARY, fg="white", relief="flat", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                      activebackground=PRIMARY_HOVER, command=self.browse_folder).pack(side=RIGHT)
+
+    def _build_step1_excel(self, parent):
+        row = ctk.CTkFrame(parent, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(parent, bg=CARD)
+        row.pack(fill=X, pady=(0, 4))
+        if USE_CUSTOMTK:
+            entry = ctk.CTkEntry(row, textvariable=self.excel_path, placeholder_text="请选择 Excel 文件路径",
+                                 height=36, border_width=1, border_color=INPUT_BORDER, fg_color=INPUT_BG,
+                                 text_color=TEXT_PRIMARY, font=(FONT_FAMILY, FONT_SIZE_BODY))
+            entry.pack(side=LEFT, fill=X, expand=True, padx=(0, 8))
+            ctk.CTkButton(row, text="浏览…", width=80, height=36, corner_radius=BORDER_RADIUS,
+                          fg_color=PRIMARY, hover_color=PRIMARY_HOVER, text_color="white",
+                          font=(FONT_FAMILY, FONT_SIZE_BODY), command=self.browse_excel).pack(side=RIGHT)
+            ctk.CTkButton(row, text="加载列", width=80, height=36, corner_radius=BORDER_RADIUS,
+                          fg_color=WARNING, hover_color="#E07B00", text_color="white",
+                          font=(FONT_FAMILY, FONT_SIZE_BODY), command=self.load_columns).pack(side=RIGHT, padx=(0, 8))
+        else:
+            entry = tk.Entry(row, textvariable=self.excel_path, font=(FONT_FAMILY, FONT_SIZE_BODY), relief="flat",
+                             bg=INPUT_BG, fg=TEXT_PRIMARY, highlightthickness=1, highlightcolor=INPUT_FOCUS,
+                             highlightbackground=INPUT_BORDER)
+            entry.pack(side=LEFT, fill=X, expand=True, padx=(0, 8))
+            tk.Button(row, text="加载列", bg=WARNING, fg="white", relief="flat", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                      activebackground="#E07B00", command=self.load_columns).pack(side=RIGHT, padx=(0, 8))
+            tk.Button(row, text="浏览…", bg=PRIMARY, fg="white", relief="flat", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                      activebackground=PRIMARY_HOVER, command=self.browse_excel).pack(side=RIGHT)
+
+    def _build_step1_mapping(self, parent):
+        self.mapping_container = ctk.CTkFrame(parent, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(parent, bg=CARD)
+        self.mapping_container.pack(fill=X)
+        if USE_CUSTOMTK:
+            ctk.CTkLabel(self.mapping_container, text="请先加载 Excel 文件以配置列映射",
+                         font=(FONT_FAMILY, FONT_SIZE_BODY), text_color=TEXT_SECONDARY).pack(pady=8)
+        else:
+            tk.Label(self.mapping_container, text="请先加载 Excel 文件以配置列映射",
+                     font=(FONT_FAMILY, FONT_SIZE_BODY), fg=TEXT_SECONDARY, bg=CARD).pack(pady=8)
+
+    def _build_step1_preview(self, parent):
+        self.preview_hint = None
+        if USE_CUSTOMTK:
+            self.preview_hint = ctk.CTkLabel(parent, text="请先选择文件夹和 Excel 文件，然后加载列映射",
+                                             font=(FONT_FAMILY, FONT_SIZE_SMALL), text_color=TEXT_SECONDARY)
+            self.preview_hint.pack(fill=X, pady=(0, 4))
+            btn_row = ctk.CTkFrame(parent, fg_color="transparent")
+            btn_row.pack(fill=X, pady=(0, 4))
+            ctk.CTkButton(btn_row, text="加载预览", width=100, height=32, corner_radius=BORDER_RADIUS,
+                          fg_color=PRIMARY, hover_color=PRIMARY_HOVER, text_color="white",
+                          font=(FONT_FAMILY, FONT_SIZE_BODY), command=self.load_preview).pack(side=LEFT)
+            self.preview_container = ctk.CTkScrollableFrame(parent, height=160, fg_color=BG,
+                                                             border_width=1, border_color=CARD_BORDER)
+            self.preview_container.pack(fill=BOTH, expand=True)
+        else:
+            self.preview_hint = tk.Label(parent, text="请先选择文件夹和 Excel 文件，然后加载列映射",
+                                         font=(FONT_FAMILY, FONT_SIZE_SMALL), fg=TEXT_SECONDARY, bg=CARD)
+            self.preview_hint.pack(fill=X, pady=(0, 4))
+            btn_row = tk.Frame(parent, bg=CARD)
+            btn_row.pack(fill=X, pady=(0, 4))
+            tk.Button(btn_row, text="加载预览", bg=PRIMARY, fg="white", relief="flat",
+                      font=(FONT_FAMILY, FONT_SIZE_BODY), activebackground=PRIMARY_HOVER,
+                      command=self.load_preview).pack(side=LEFT)
+            self.preview_container = tk.Frame(parent, bg=CARD)
+            self.preview_container.pack(fill=BOTH, expand=True)
+
+    def _build_mapping_widgets(self):
+        for w in self.mapping_container.winfo_children():
+            w.destroy()
+        self.mapping_widgets = {}
+        if not self.column_mapping.headers:
+            return
+        fields = [("id", "关键列（匹配附件）"), ("email", "邮箱列"), ("name", "姓名列")]
+        headers = self.column_mapping.headers
+        for field, label in fields:
+            row = ctk.CTkFrame(self.mapping_container, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(self.mapping_container, bg=CARD)
+            row.pack(fill=X, pady=2)
+            if USE_CUSTOMTK:
+                ctk.CTkLabel(row, text=label, width=160, anchor="w", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                             text_color=TEXT_PRIMARY).pack(side=LEFT)
+                combo = ctk.CTkComboBox(row, values=headers, width=240, height=32,
+                                        border_width=1, border_color=INPUT_BORDER, fg_color=INPUT_BG,
+                                        text_color=TEXT_PRIMARY, font=(FONT_FAMILY, FONT_SIZE_BODY),
+                                        dropdown_fg_color=CARD, dropdown_hover_color=BG,
+                                        command=lambda val, f=field: self._on_mapping_change(f, val))
+            else:
+                tk.Label(row, text=label, width=20, anchor="w", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                         fg=TEXT_PRIMARY, bg=CARD).pack(side=LEFT)
+                combo = ttk.Combobox(row, values=headers, width=30, state="readonly",
+                                     font=(FONT_FAMILY, FONT_SIZE_BODY))
+                combo.bind("<<ComboboxSelected>>", lambda e, f=field, c=combo: self._on_mapping_change(f, c.get()))
+            suggested = self._suggest_column(field, headers)
+            if suggested:
+                combo.set(suggested)
+                idx = headers.index(suggested)
+                self.column_mapping.set_mapping(field, idx)
+            combo.pack(side=LEFT, padx=8)
+            self.mapping_widgets[field] = combo
+
+    def _suggest_column(self, field, headers):
+        for i, h in enumerate(headers):
+            if suggest_field_type(h) == field:
+                return h
+        return None
+
+    def _on_mapping_change(self, field, value):
+        headers = self.column_mapping.headers
+        if value in headers:
+            self.column_mapping.set_mapping(field, headers.index(value))
+
+    def _card(self, parent, title, build_fn):
+        if USE_CUSTOMTK:
+            card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=BORDER_RADIUS, border_width=1,
+                                border_color=CARD_BORDER)
+            card.pack(fill=X, padx=24, pady=6)
+            ctk.CTkLabel(card, text=title, font=(FONT_FAMILY, FONT_SIZE_SUBTITLE, "bold"),
+                         text_color=TEXT_PRIMARY, anchor="w").pack(fill=X, padx=16, pady=(12, 4))
+            inner = ctk.CTkFrame(card, fg_color="transparent")
+            inner.pack(fill=X, padx=16, pady=(0, 12))
+        else:
+            card = tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground=CARD_BORDER)
+            card.pack(fill=X, padx=24, pady=6)
+            tk.Label(card, text=title, font=(FONT_FAMILY, FONT_SIZE_SUBTITLE, "bold"),
+                     fg=TEXT_PRIMARY, bg=CARD, anchor="w").pack(fill=X, padx=16, pady=(12, 4))
+            inner = tk.Frame(card, bg=CARD)
+            inner.pack(fill=X, padx=16, pady=(0, 12))
+        build_fn(inner)
+
+    def create_step2(self):
+        if USE_CUSTOMTK:
+            frame = ctk.CTkFrame(self.content_frame, fg_color=BG)
+        else:
+            frame = tk.Frame(self.content_frame, bg=BG)
+        self._card(frame, "邮件主题", self._build_step2_subject)
+        self._card(frame, "邮件正文", self._build_step2_body)
+        self._card(frame, "插入变量", self._build_step2_vars)
+        self._card(frame, "自定义变量", self._build_step2_custom_vars)
+        self._build_step2_format_toolbar(frame)
+        return frame
+
+    def _build_step2_subject(self, parent):
+        if USE_CUSTOMTK:
+            entry = ctk.CTkEntry(parent, textvariable=self.subject_var, placeholder_text="请输入邮件主题，可用 {姓名} 等变量",
+                                 height=36, border_width=1, border_color=INPUT_BORDER, fg_color=INPUT_BG,
+                                 text_color=TEXT_PRIMARY, font=(FONT_FAMILY, FONT_SIZE_BODY))
+            entry.pack(fill=X, pady=(0, 4))
+        else:
+            entry = tk.Entry(parent, textvariable=self.subject_var, font=(FONT_FAMILY, FONT_SIZE_BODY), relief="flat",
+                             bg=INPUT_BG, fg=TEXT_PRIMARY, highlightthickness=1, highlightcolor=INPUT_FOCUS,
+                             highlightbackground=INPUT_BORDER)
+            entry.pack(fill=X, pady=(0, 4))
+        var_row = ctk.CTkFrame(parent, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(parent, bg=CARD)
+        var_row.pack(fill=X)
+        self.custom_var_subject_container = var_row
+        if USE_CUSTOMTK:
+            ctk.CTkLabel(var_row, text="插入变量:", font=(FONT_FAMILY, FONT_SIZE_SMALL), text_color=TEXT_SECONDARY).pack(side=LEFT, padx=(0, 4))
+        else:
+            tk.Label(var_row, text="插入变量:", font=(FONT_FAMILY, FONT_SIZE_SMALL), fg=TEXT_SECONDARY, bg=CARD).pack(side=LEFT, padx=(0, 4))
+        for var in ["{姓名}", "{学号}", "{邮箱}"]:
+            if USE_CUSTOMTK:
+                ctk.CTkButton(var_row, text=var, width=80, height=26, corner_radius=12, fg_color=BG,
+                              hover_color="#D8D8D8", text_color=PRIMARY, font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                              border_width=1, border_color=CARD_BORDER,
+                              command=lambda v=var: self.insert_var_to_subject(v)).pack(side=LEFT, padx=2)
+            else:
+                tk.Button(var_row, text=var, bg=BG, fg=PRIMARY, relief="flat", font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                          activebackground="#D8D8D8", command=lambda v=var: self.insert_var_to_subject(v)).pack(side=LEFT, padx=2)
+
+    def _build_step2_body(self, parent):
+        self.body_widget = ScrolledText(parent, height=10, font=(FONT_FAMILY, FONT_SIZE_BODY), wrap=WORD,
+                                        bg=INPUT_BG, fg=TEXT_PRIMARY, insertbackground=TEXT_PRIMARY,
+                                        relief="flat", highlightthickness=1,
+                                        highlightcolor=INPUT_FOCUS, highlightbackground=INPUT_BORDER,
+                                        padx=8, pady=8)
+        self.body_widget.pack(fill=BOTH, expand=True, pady=(0, 4))
+        self.body_widget.tag_configure("font_style", font=(FONT_FAMILY, FONT_SIZE_BODY))
+        for size_name, size_val in [("size_small", 10), ("size_normal", 13), ("size_large", 16), ("size_xlarge", 20), ("size_xxlarge", 24)]:
+            self.body_widget.tag_configure(size_name, font=(FONT_FAMILY, size_val))
+        self.body_widget.tag_configure("align_right", justify="right")
+        self.body_widget.tag_configure("align_left", justify="left")
+        self.body_widget.tag_configure("align_center", justify="center")
+        self.body_widget.tag_configure("indented", lmargin1=40, lmargin2=40)
+        default_body = "姓名同学：\n\n您好！请查收附件。\n\n祝好！"
+        self.body_widget.insert("1.0", default_body)
+
+    def _build_step2_vars(self, parent):
+        row = ctk.CTkFrame(parent, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(parent, bg=CARD)
+        row.pack(fill=X)
+        variables = ["{姓名}", "{学号}", "{邮箱}"]
+        for var in variables:
+            if USE_CUSTOMTK:
+                ctk.CTkButton(row, text=var, width=80, height=28, corner_radius=14, fg_color=BG,
+                              hover_color="#D8D8D8", text_color=PRIMARY, font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                              border_width=1, border_color=CARD_BORDER,
+                              command=lambda v=var: self.insert_var(v)).pack(side=LEFT, padx=4)
+            else:
+                tk.Button(row, text=var, bg=BG, fg=PRIMARY, relief="flat", font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                          activebackground="#D8D8D8", command=lambda v=var: self.insert_var(v)).pack(side=LEFT, padx=4)
+        self.custom_var_body_container = row
+
+    def _build_step2_custom_vars(self, parent):
+        add_row = ctk.CTkFrame(parent, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(parent, bg=CARD)
+        add_row.pack(fill=X, pady=(0, 4))
+        if USE_CUSTOMTK:
+            ctk.CTkLabel(add_row, text="变量名:", font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                         text_color=TEXT_PRIMARY).pack(side=LEFT, padx=(0, 4))
+            self.cv_name_entry = ctk.CTkEntry(add_row, width=120, height=30, placeholder_text="如: 班级",
+                                              border_width=1, border_color=INPUT_BORDER, fg_color=INPUT_BG,
+                                              text_color=TEXT_PRIMARY, font=(FONT_FAMILY, FONT_SIZE_SMALL))
+            self.cv_name_entry.pack(side=LEFT, padx=(0, 8))
+            ctk.CTkLabel(add_row, text="变量值:", font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                         text_color=TEXT_PRIMARY).pack(side=LEFT, padx=(0, 4))
+            self.cv_value_entry = ctk.CTkEntry(add_row, width=160, height=30, placeholder_text="如: 计算机2班",
+                                               border_width=1, border_color=INPUT_BORDER, fg_color=INPUT_BG,
+                                               text_color=TEXT_PRIMARY, font=(FONT_FAMILY, FONT_SIZE_SMALL))
+            self.cv_value_entry.pack(side=LEFT, padx=(0, 8))
+            ctk.CTkButton(add_row, text="添加", width=60, height=30, corner_radius=BORDER_RADIUS,
+                          fg_color=PRIMARY, hover_color=PRIMARY_HOVER, text_color="white",
+                          font=(FONT_FAMILY, FONT_SIZE_SMALL), command=self._add_custom_var).pack(side=LEFT, padx=2)
+            ctk.CTkButton(add_row, text="预览", width=60, height=30, corner_radius=BORDER_RADIUS,
+                          fg_color=WARNING, hover_color="#E07B00", text_color="white",
+                          font=(FONT_FAMILY, FONT_SIZE_SMALL), command=self._preview_custom_vars).pack(side=LEFT, padx=2)
+        else:
+            tk.Label(add_row, text="变量名:", font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                     fg=TEXT_PRIMARY, bg=CARD).pack(side=LEFT, padx=(0, 4))
+            self.cv_name_entry = tk.Entry(add_row, width=15, font=(FONT_FAMILY, FONT_SIZE_SMALL), relief="flat",
+                                          bg=INPUT_BG, fg=TEXT_PRIMARY, highlightthickness=1,
+                                          highlightcolor=INPUT_FOCUS, highlightbackground=INPUT_BORDER)
+            self.cv_name_entry.pack(side=LEFT, padx=(0, 8))
+            tk.Label(add_row, text="变量值:", font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                     fg=TEXT_PRIMARY, bg=CARD).pack(side=LEFT, padx=(0, 4))
+            self.cv_value_entry = tk.Entry(add_row, width=20, font=(FONT_FAMILY, FONT_SIZE_SMALL), relief="flat",
+                                           bg=INPUT_BG, fg=TEXT_PRIMARY, highlightthickness=1,
+                                           highlightcolor=INPUT_FOCUS, highlightbackground=INPUT_BORDER)
+            self.cv_value_entry.pack(side=LEFT, padx=(0, 8))
+            tk.Button(add_row, text="添加", bg=PRIMARY, fg="white", relief="flat", width=6, height=1,
+                      font=(FONT_FAMILY, FONT_SIZE_SMALL), activebackground=PRIMARY_HOVER,
+                      command=self._add_custom_var).pack(side=LEFT, padx=2)
+            tk.Button(add_row, text="预览", bg=WARNING, fg="white", relief="flat", width=6, height=1,
+                      font=(FONT_FAMILY, FONT_SIZE_SMALL), activebackground="#E07B00",
+                      command=self._preview_custom_vars).pack(side=LEFT, padx=2)
+        self.custom_var_container = ctk.CTkFrame(parent, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(parent, bg=CARD)
+        self.custom_var_container.pack(fill=X)
+        self._refresh_custom_var_list()
+
+    def _add_custom_var(self):
+        name = self.cv_name_entry.get().strip()
+        value = self.cv_value_entry.get().strip()
+        if not name:
+            messagebox.showwarning("提示", "请输入变量名")
+            return
+        if not re.match(r'^[\w\u4e00-\u9fff]+$', name):
+            messagebox.showwarning("提示", "变量名只能包含字母、数字、下划线或中文")
+            return
+        reserved = ["姓名", "学号", "邮箱"]
+        if name in reserved:
+            messagebox.showwarning("提示", f"变量名 '{name}' 为系统内置变量，请更换名称")
+            return
+        for cv in self.custom_vars:
+            if cv["name"] == name:
+                messagebox.showwarning("提示", f"变量 '{name}' 已存在，请勿重复添加")
+                return
+        if not value:
+            value = name
+        self.custom_vars.append({"name": name, "value": value})
+        self.cv_name_entry.delete(0, END)
+        self.cv_value_entry.delete(0, END)
+        self._refresh_custom_var_list()
+        self._refresh_all_var_buttons()
+
+    def _edit_custom_var(self, index):
+        if index < 0 or index >= len(self.custom_vars):
+            return
+        old = self.custom_vars[index]
+        dialog = tk.Toplevel(self.root)
+        dialog.title("编辑变量")
+        dialog.geometry("350x160")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        if USE_CUSTOMTK:
+            dialog.configure(fg_color=BG)
+        else:
+            dialog.configure(bg=BG)
+        dlg_frame = ctk.CTkFrame(dialog, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(dialog, bg=BG)
+        dlg_frame.pack(fill=BOTH, expand=True, padx=20, pady=16)
+        if USE_CUSTOMTK:
+            ctk.CTkLabel(dlg_frame, text="变量名:", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                         text_color=TEXT_PRIMARY).pack(anchor="w")
+            name_entry = ctk.CTkEntry(dlg_frame, width=280, height=32, border_width=1,
+                                      border_color=INPUT_BORDER, fg_color=INPUT_BG, text_color=TEXT_PRIMARY,
+                                      font=(FONT_FAMILY, FONT_SIZE_BODY))
+            name_entry.insert(0, old["name"])
+            name_entry.configure(state="disabled")
+            name_entry.pack(pady=(4, 8))
+            ctk.CTkLabel(dlg_frame, text="变量值:", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                         text_color=TEXT_PRIMARY).pack(anchor="w")
+            value_entry = ctk.CTkEntry(dlg_frame, width=280, height=32, border_width=1,
+                                       border_color=INPUT_BORDER, fg_color=INPUT_BG, text_color=TEXT_PRIMARY,
+                                       font=(FONT_FAMILY, FONT_SIZE_BODY))
+            value_entry.insert(0, old["value"])
+            value_entry.pack(pady=(4, 8))
+        else:
+            tk.Label(dlg_frame, text="变量名:", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                     fg=TEXT_PRIMARY, bg=BG).pack(anchor="w")
+            name_entry = tk.Entry(dlg_frame, width=35, font=(FONT_FAMILY, FONT_SIZE_BODY), relief="flat",
+                                  bg=INPUT_BG, fg=TEXT_DISABLED, state="disabled",
+                                  highlightthickness=1, highlightcolor=INPUT_FOCUS, highlightbackground=INPUT_BORDER)
+            name_entry.insert(0, old["name"])
+            name_entry.pack(pady=(4, 8))
+            tk.Label(dlg_frame, text="变量值:", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                     fg=TEXT_PRIMARY, bg=BG).pack(anchor="w")
+            value_entry = tk.Entry(dlg_frame, width=35, font=(FONT_FAMILY, FONT_SIZE_BODY), relief="flat",
+                                   bg=INPUT_BG, fg=TEXT_PRIMARY, highlightthickness=1,
+                                   highlightcolor=INPUT_FOCUS, highlightbackground=INPUT_BORDER)
+            value_entry.insert(0, old["value"])
+            value_entry.pack(pady=(4, 8))
+        def do_save():
+            new_value = value_entry.get().strip()
+            if not new_value:
+                new_value = old["name"]
+            self.custom_vars[index]["value"] = new_value
+            dialog.destroy()
+            self._refresh_custom_var_list()
+            self._refresh_all_var_buttons()
+        btn_frame = ctk.CTkFrame(dlg_frame, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(dlg_frame, bg=BG)
+        btn_frame.pack(fill=X)
+        if USE_CUSTOMTK:
+            ctk.CTkButton(btn_frame, text="保存", width=80, height=32, corner_radius=BORDER_RADIUS,
+                          fg_color=PRIMARY, hover_color=PRIMARY_HOVER, text_color="white",
+                          font=(FONT_FAMILY, FONT_SIZE_BODY), command=do_save).pack(side=RIGHT, padx=4)
+            ctk.CTkButton(btn_frame, text="取消", width=80, height=32, corner_radius=BORDER_RADIUS,
+                          fg_color="transparent", border_width=1, border_color=INPUT_BORDER,
+                          text_color=TEXT_PRIMARY, font=(FONT_FAMILY, FONT_SIZE_BODY),
+                          command=dialog.destroy).pack(side=RIGHT, padx=4)
+        else:
+            tk.Button(btn_frame, text="保存", bg=PRIMARY, fg="white", relief="flat", width=8, height=1,
+                      font=(FONT_FAMILY, FONT_SIZE_BODY), activebackground=PRIMARY_HOVER,
+                      command=do_save).pack(side=RIGHT, padx=4)
+            tk.Button(btn_frame, text="取消", bg=CARD, fg=TEXT_PRIMARY, relief="flat", width=8, height=1,
+                      font=(FONT_FAMILY, FONT_SIZE_BODY), activebackground="#E8E8E8",
+                      command=dialog.destroy).pack(side=RIGHT, padx=4)
+
+    def _delete_custom_var(self, index):
+        if index < 0 or index >= len(self.custom_vars):
+            return
+        var_name = self.custom_vars[index]["name"]
+        if messagebox.askyesno("确认删除", f"确定要删除变量 '{var_name}' 吗？"):
+            del self.custom_vars[index]
+            self._refresh_custom_var_list()
+            self._refresh_all_var_buttons()
+
+    def _refresh_custom_var_list(self):
+        if not self.custom_var_container:
+            return
+        for w in self.custom_var_container.winfo_children():
+            w.destroy()
+        if not self.custom_vars:
+            hint = "暂无自定义变量，请在上方添加"
+            if USE_CUSTOMTK:
+                ctk.CTkLabel(self.custom_var_container, text=hint, font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                             text_color=TEXT_SECONDARY).pack(pady=4)
+            else:
+                tk.Label(self.custom_var_container, text=hint, font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                         fg=TEXT_SECONDARY, bg=CARD).pack(pady=4)
+            return
+        for idx, cv in enumerate(self.custom_vars):
+            row = ctk.CTkFrame(self.custom_var_container, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(self.custom_var_container, bg=CARD)
+            row.pack(fill=X, pady=1)
+            display_text = f"{{{{{cv['name']}}}}} = {cv['value']}"
+            if USE_CUSTOMTK:
+                ctk.CTkLabel(row, text=display_text, font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                             text_color=TEXT_PRIMARY, anchor="w").pack(side=LEFT, padx=(0, 8))
+                ctk.CTkButton(row, text="编辑", width=50, height=24, corner_radius=4, fg_color=BG,
+                              hover_color="#D8D8D8", text_color=TEXT_SECONDARY, font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                              border_width=1, border_color=CARD_BORDER,
+                              command=lambda i=idx: self._edit_custom_var(i)).pack(side=RIGHT, padx=2)
+                ctk.CTkButton(row, text="删除", width=50, height=24, corner_radius=4, fg_color=BG,
+                              hover_color="#D8D8D8", text_color=ERROR, font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                              border_width=1, border_color=CARD_BORDER,
+                              command=lambda i=idx: self._delete_custom_var(i)).pack(side=RIGHT, padx=2)
+                ctk.CTkButton(row, text="插入正文", width=64, height=24, corner_radius=4, fg_color=BG,
+                              hover_color="#D8D8D8", text_color=PRIMARY, font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                              border_width=1, border_color=CARD_BORDER,
+                              command=lambda i=idx: self.insert_var(f"{{{self.custom_vars[i]['name']}}}")).pack(side=RIGHT, padx=2)
+            else:
+                tk.Label(row, text=display_text, font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                         fg=TEXT_PRIMARY, bg=CARD, anchor="w").pack(side=LEFT, padx=(0, 8))
+                tk.Button(row, text="编辑", bg=BG, fg=TEXT_SECONDARY, relief="flat", width=5, height=1,
+                          font=(FONT_FAMILY, FONT_SIZE_SMALL), activebackground="#D8D8D8",
+                          command=lambda i=idx: self._edit_custom_var(i)).pack(side=RIGHT, padx=2)
+                tk.Button(row, text="删除", bg=BG, fg=ERROR, relief="flat", width=5, height=1,
+                          font=(FONT_FAMILY, FONT_SIZE_SMALL), activebackground="#D8D8D8",
+                          command=lambda i=idx: self._delete_custom_var(i)).pack(side=RIGHT, padx=2)
+                tk.Button(row, text="插入正文", bg=BG, fg=PRIMARY, relief="flat", width=8, height=1,
+                          font=(FONT_FAMILY, FONT_SIZE_SMALL), activebackground="#D8D8D8",
+                          command=lambda i=idx: self.insert_var(f"{{{self.custom_vars[i]['name']}}}")).pack(side=RIGHT, padx=2)
+
+    def _refresh_all_var_buttons(self):
+        self._refresh_custom_var_subject_buttons()
+        self._refresh_custom_var_body_buttons()
+
+    def _refresh_custom_var_subject_buttons(self):
+        if not self.custom_var_subject_container:
+            return
+        for w in self.custom_var_subject_container.winfo_children():
+            w.destroy()
+        if USE_CUSTOMTK:
+            ctk.CTkLabel(self.custom_var_subject_container, text="插入变量:", font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                         text_color=TEXT_SECONDARY).pack(side=LEFT, padx=(0, 4))
+        else:
+            tk.Label(self.custom_var_subject_container, text="插入变量:", font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                     fg=TEXT_SECONDARY, bg=CARD).pack(side=LEFT, padx=(0, 4))
+        for var in ["{姓名}", "{学号}", "{邮箱}"]:
+            self._make_var_button(self.custom_var_subject_container, var, lambda v=var: self.insert_var_to_subject(v))
+        for cv in self.custom_vars:
+            display = f"{{{cv['name']}}}"
+            self._make_var_button(self.custom_var_subject_container, display,
+                                  lambda v=display: self.insert_var_to_subject(v))
+
+    def _refresh_custom_var_body_buttons(self):
+        if not self.custom_var_body_container:
+            return
+        for w in self.custom_var_body_container.winfo_children():
+            w.destroy()
+        for var in ["{姓名}", "{学号}", "{邮箱}"]:
+            self._make_var_button(self.custom_var_body_container, var, lambda v=var: self.insert_var(v))
+        for cv in self.custom_vars:
+            display = f"{{{cv['name']}}}"
+            self._make_var_button(self.custom_var_body_container, display,
+                                  lambda v=display: self.insert_var(v))
+
+    def _make_var_button(self, parent, text, cmd):
+        if USE_CUSTOMTK:
+            ctk.CTkButton(parent, text=text, width=max(60, len(text) * 10), height=26, corner_radius=12,
+                          fg_color=BG, hover_color="#D8D8D8", text_color=PRIMARY,
+                          font=(FONT_FAMILY, FONT_SIZE_SMALL), border_width=1, border_color=CARD_BORDER,
+                          command=cmd).pack(side=LEFT, padx=2, pady=2)
+        else:
+            tk.Button(parent, text=text, bg=BG, fg=PRIMARY, relief="flat",
+                      font=(FONT_FAMILY, FONT_SIZE_SMALL), activebackground="#D8D8D8",
+                      command=cmd).pack(side=LEFT, padx=2, pady=2)
+
+    def _preview_custom_vars(self):
+        if not self.custom_vars:
+            messagebox.showinfo("预览", "暂无自定义变量，请先添加")
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("变量预览")
+        dialog.geometry("500x320")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        if USE_CUSTOMTK:
+            dialog.configure(fg_color=BG)
+        else:
+            dialog.configure(bg=BG)
+        dlg_frame = ctk.CTkFrame(dialog, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(dialog, bg=BG)
+        dlg_frame.pack(fill=BOTH, expand=True, padx=20, pady=16)
+        if USE_CUSTOMTK:
+            ctk.CTkLabel(dlg_frame, text="变量替换预览", font=(FONT_FAMILY, FONT_SIZE_SUBTITLE, "bold"),
+                         text_color=TEXT_PRIMARY).pack(anchor="w", pady=(0, 8))
+        else:
+            tk.Label(dlg_frame, text="变量替换预览", font=(FONT_FAMILY, FONT_SIZE_SUBTITLE, "bold"),
+                     fg=TEXT_PRIMARY, bg=BG).pack(anchor="w", pady=(0, 8))
+        preview_text = ctk.CTkTextbox(dlg_frame, height=200, font=(FONT_FAMILY, FONT_SIZE_BODY),
+                                       fg_color=INPUT_BG, text_color=TEXT_PRIMARY) if USE_CUSTOMTK else \
+                       ScrolledText(dlg_frame, height=12, font=(FONT_FAMILY, FONT_SIZE_BODY), wrap="word",
+                                    bg=INPUT_BG, fg=TEXT_PRIMARY, relief="flat", padx=8, pady=8)
+        preview_text.pack(fill=BOTH, expand=True, pady=(0, 8))
+        lines = []
+        lines.append("=== 自定义变量列表 ===\n")
+        for cv in self.custom_vars:
+            lines.append(f"  {{{cv['name']}}}  →  {cv['value']}")
+        lines.append("")
+        lines.append("=== 邮件主题预览 ===\n")
+        subject = self.subject_var.get()
+        for cv in self.custom_vars:
+            subject = subject.replace(f"{{{cv['name']}}}", cv["value"])
+        for cv_name in ["姓名", "学号", "邮箱"]:
+            subject = subject.replace(f"{{{cv_name}}}", f"[{cv_name}示例]")
+        lines.append(f"  {subject}")
+        lines.append("")
+        lines.append("=== 邮件正文预览（前200字）===\n")
+        if self.body_widget:
+            body = self.body_widget.get("1.0", "end-1c")
+            for cv in self.custom_vars:
+                body = body.replace(f"{{{cv['name']}}}", cv["value"])
+            for cv_name in ["姓名", "学号", "邮箱"]:
+                body = body.replace(f"{{{cv_name}}}", f"[{cv_name}示例]")
+            lines.append(f"  {body[:200]}{'...' if len(body) > 200 else ''}")
+        content = "\n".join(lines)
+        if USE_CUSTOMTK:
+            preview_text.insert("1.0", content)
+            preview_text.configure(state="disabled")
+        else:
+            preview_text.insert("1.0", content)
+            preview_text.configure(state="disabled")
+        if USE_CUSTOMTK:
+            ctk.CTkButton(dlg_frame, text="关闭", width=80, height=32, corner_radius=BORDER_RADIUS,
+                          fg_color=PRIMARY, hover_color=PRIMARY_HOVER, text_color="white",
+                          font=(FONT_FAMILY, FONT_SIZE_BODY), command=dialog.destroy).pack()
+        else:
+            tk.Button(dlg_frame, text="关闭", bg=PRIMARY, fg="white", relief="flat", width=8, height=1,
+                      font=(FONT_FAMILY, FONT_SIZE_BODY), activebackground=PRIMARY_HOVER,
+                      command=dialog.destroy).pack()
+
+    def _build_step2_format_toolbar(self, parent):
+        if USE_CUSTOMTK:
+            bar = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=BORDER_RADIUS, border_width=1,
+                               border_color=CARD_BORDER)
+            bar.pack(fill=X, padx=24, pady=6)
+            row1 = ctk.CTkFrame(bar, fg_color="transparent")
+            row1.pack(fill=X, padx=16, pady=(8, 2))
+            ctk.CTkLabel(row1, text="格式工具", font=(FONT_FAMILY, FONT_SIZE_SMALL, "bold"),
+                         text_color=TEXT_SECONDARY).pack(side=LEFT, padx=(0, 12))
+            tools1 = [
+                ("B", "加粗", self.format_bold),
+                ("I", "斜体", self.format_italic),
+                ("U", "下划线", self.format_underline),
+            ]
+            for sym, tip, cmd in tools1:
+                ctk.CTkButton(row1, text=sym, width=32, height=28, corner_radius=6, fg_color=BG,
+                              hover_color="#D8D8D8", text_color=TEXT_PRIMARY, font=(FONT_FAMILY, FONT_SIZE_BODY, "bold"),
+                              border_width=1, border_color=CARD_BORDER, command=cmd).pack(side=LEFT, padx=2)
+            sep1 = ctk.CTkLabel(row1, text="|", text_color=CARD_BORDER, font=(FONT_FAMILY, 14))
+            sep1.pack(side=LEFT, padx=4)
+            ctk.CTkLabel(row1, text="字号:", font=(FONT_FAMILY, FONT_SIZE_SMALL), text_color=TEXT_SECONDARY).pack(side=LEFT, padx=(4, 2))
+            self.font_size_var = ctk.StringVar(value="正常")
+            size_menu = ctk.CTkOptionMenu(row1, variable=self.font_size_var, values=["小", "正常", "大", "较大", "特大"],
+                                          width=72, height=28, corner_radius=6, fg_color=BG,
+                                          button_color=CARD_BORDER, button_hover_color="#D8D8D8",
+                                          text_color=TEXT_PRIMARY, font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                                          command=self.format_font_size)
+            size_menu.pack(side=LEFT, padx=2)
+            sep2 = ctk.CTkLabel(row1, text="|", text_color=CARD_BORDER, font=(FONT_FAMILY, 14))
+            sep2.pack(side=LEFT, padx=4)
+            ctk.CTkLabel(row1, text="颜色:", font=(FONT_FAMILY, FONT_SIZE_SMALL), text_color=TEXT_SECONDARY).pack(side=LEFT, padx=(4, 2))
+            self.color_var = ctk.StringVar(value="默认")
+            color_menu = ctk.CTkOptionMenu(row1, variable=self.color_var,
+                                           values=["默认", "红色", "蓝色", "绿色", "橙色", "紫色", "黑色"],
+                                           width=72, height=28, corner_radius=6, fg_color=BG,
+                                           button_color=CARD_BORDER, button_hover_color="#D8D8D8",
+                                           text_color=TEXT_PRIMARY, font=(FONT_FAMILY, FONT_SIZE_SMALL),
+                                           command=self.format_text_color)
+            color_menu.pack(side=LEFT, padx=2)
+            row2 = ctk.CTkFrame(bar, fg_color="transparent")
+            row2.pack(fill=X, padx=16, pady=(2, 8))
+            tools2 = [
+                ("≡", "左对齐", self.format_align_left),
+                ("≡", "居中对齐", self.format_align_center),
+                ("≡", "右对齐", self.format_align_right),
+                ("⇤", "首行缩进", self.format_first_line_indent),
+                ("✕", "清除格式", self.clear_formatting),
+            ]
+            for sym, tip, cmd in tools2:
+                ctk.CTkButton(row2, text=sym, width=32, height=28, corner_radius=6, fg_color=BG,
+                              hover_color="#D8D8D8", text_color=TEXT_PRIMARY, font=(FONT_FAMILY, FONT_SIZE_BODY, "bold"),
+                              border_width=1, border_color=CARD_BORDER, command=cmd).pack(side=LEFT, padx=2)
+        else:
+            bar = tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground=CARD_BORDER)
+            bar.pack(fill=X, padx=24, pady=6)
+            row1 = tk.Frame(bar, bg=CARD)
+            row1.pack(fill=X, padx=16, pady=(8, 2))
+            tk.Label(row1, text="格式工具", font=(FONT_FAMILY, FONT_SIZE_SMALL, "bold"),
+                     fg=TEXT_SECONDARY, bg=CARD).pack(side=LEFT, padx=(0, 12))
+            for sym, tip, cmd in [("B", "加粗", self.format_bold), ("I", "斜体", self.format_italic),
+                                   ("U", "下划线", self.format_underline)]:
+                tk.Button(row1, text=sym, bg=BG, fg=TEXT_PRIMARY, relief="flat", width=3, height=1,
+                          font=(FONT_FAMILY, FONT_SIZE_BODY, "bold"), activebackground="#D8D8D8",
+                          command=cmd).pack(side=LEFT, padx=2)
+            tk.Label(row1, text="|", fg=CARD_BORDER, bg=CARD, font=(FONT_FAMILY, 14)).pack(side=LEFT, padx=4)
+            tk.Label(row1, text="字号:", font=(FONT_FAMILY, FONT_SIZE_SMALL), fg=TEXT_SECONDARY, bg=CARD).pack(side=LEFT, padx=(4, 2))
+            self.font_size_var = tk.StringVar(value="正常")
+            size_values = ["小", "正常", "大", "较大", "特大"]
+            size_menu = ttk.Combobox(row1, textvariable=self.font_size_var, values=size_values, width=6, state="readonly",
+                                     font=(FONT_FAMILY, FONT_SIZE_SMALL))
+            size_menu.pack(side=LEFT, padx=2)
+            size_menu.bind("<<ComboboxSelected>>", lambda e: self.format_font_size(self.font_size_var.get()))
+            tk.Label(row1, text="|", fg=CARD_BORDER, bg=CARD, font=(FONT_FAMILY, 14)).pack(side=LEFT, padx=4)
+            tk.Label(row1, text="颜色:", font=(FONT_FAMILY, FONT_SIZE_SMALL), fg=TEXT_SECONDARY, bg=CARD).pack(side=LEFT, padx=(4, 2))
+            self.color_var = tk.StringVar(value="默认")
+            color_values = ["默认", "红色", "蓝色", "绿色", "橙色", "紫色", "黑色"]
+            color_menu = ttk.Combobox(row1, textvariable=self.color_var, values=color_values, width=6, state="readonly",
+                                      font=(FONT_FAMILY, FONT_SIZE_SMALL))
+            color_menu.pack(side=LEFT, padx=2)
+            color_menu.bind("<<ComboboxSelected>>", lambda e: self.format_text_color(self.color_var.get()))
+            row2 = tk.Frame(bar, bg=CARD)
+            row2.pack(fill=X, padx=16, pady=(2, 8))
+            for sym, tip, cmd in [("≡", "左对齐", self.format_align_left), ("≡", "居中对齐", self.format_align_center),
+                                   ("≡", "右对齐", self.format_align_right), ("⇤", "首行缩进", self.format_first_line_indent),
+                                   ("✕", "清除格式", self.clear_formatting)]:
+                tk.Button(row2, text=sym, bg=BG, fg=TEXT_PRIMARY, relief="flat", width=3, height=1,
+                          font=(FONT_FAMILY, FONT_SIZE_BODY, "bold"), activebackground="#D8D8D8",
+                          command=cmd).pack(side=LEFT, padx=2)
+
+    def create_step3(self):
+        if USE_CUSTOMTK:
+            frame = ctk.CTkFrame(self.content_frame, fg_color=BG)
+        else:
+            frame = tk.Frame(self.content_frame, bg=BG)
+        self._card(frame, "SMTP 服务器", self._build_step3_smtp)
+        self._card(frame, "发件人信息", self._build_step3_sender)
+        self._build_step3_test_btn(frame)
+        self._card(frame, "发送设置", self._build_step3_settings)
+        return frame
+
+    def _build_step3_test_btn(self, parent):
+        if USE_CUSTOMTK:
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill=X, padx=24, pady=6)
+            ctk.CTkButton(row, text="测试连接", width=120, height=36, corner_radius=BORDER_RADIUS,
+                          fg_color=SUCCESS, hover_color=SUCCESS_HOVER, text_color="white",
+                          font=(FONT_FAMILY, FONT_SIZE_BUTTON, "bold"),
+                          command=self.test_connection).pack(side=LEFT)
+        else:
+            row = tk.Frame(parent, bg=BG)
+            row.pack(fill=X, padx=24, pady=6)
+            tk.Button(row, text="测试连接", bg=SUCCESS, fg="white", relief="flat",
+                      font=(FONT_FAMILY, FONT_SIZE_BUTTON, "bold"),
+                      activebackground=SUCCESS_HOVER, command=self.test_connection).pack(side=LEFT)
+
+    def _build_step3_smtp(self, parent):
+        grid = ctk.CTkFrame(parent, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(parent, bg=CARD)
+        grid.pack(fill=X)
+        configs = [("SMTP 服务器:", self.smtp_server, 240), ("端口:", self.smtp_port, 100)]
+        for i, (label, var, w) in enumerate(configs):
+            r = ctk.CTkFrame(grid, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(grid, bg=CARD)
+            r.pack(fill=X, pady=2)
+            if USE_CUSTOMTK:
+                ctk.CTkLabel(r, text=label, width=120, anchor="w", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                             text_color=TEXT_PRIMARY).pack(side=LEFT)
+                ctk.CTkEntry(r, textvariable=var, width=w, height=32, border_width=1,
+                             border_color=INPUT_BORDER, fg_color=INPUT_BG, text_color=TEXT_PRIMARY,
+                             font=(FONT_FAMILY, FONT_SIZE_BODY)).pack(side=LEFT, padx=4)
+            else:
+                tk.Label(r, text=label, width=16, anchor="w", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                         fg=TEXT_PRIMARY, bg=CARD).pack(side=LEFT)
+                tk.Entry(r, textvariable=var, width=w // 8, font=(FONT_FAMILY, FONT_SIZE_BODY), relief="flat",
+                         bg=INPUT_BG, fg=TEXT_PRIMARY, highlightthickness=1, highlightcolor=INPUT_FOCUS,
+                         highlightbackground=INPUT_BORDER).pack(side=LEFT, padx=4)
+        row_tls = ctk.CTkFrame(grid, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(grid, bg=CARD)
+        row_tls.pack(fill=X, pady=2)
+        if USE_CUSTOMTK:
+            ctk.CTkLabel(row_tls, text="", width=120).pack(side=LEFT)
+            ctk.CTkCheckBox(row_tls, text="使用 TLS 加密", variable=self.use_tls, onvalue=True, offvalue=False,
+                            font=(FONT_FAMILY, FONT_SIZE_BODY), text_color=TEXT_PRIMARY,
+                            fg_color=PRIMARY, hover_color=PRIMARY_HOVER).pack(side=LEFT)
+        else:
+            tk.Checkbutton(row_tls, text="使用 TLS 加密", variable=self.use_tls, font=(FONT_FAMILY, FONT_SIZE_BODY),
+                           fg=TEXT_PRIMARY, bg=CARD, selectcolor=CARD, activebackground=CARD).pack(side=LEFT, padx=(120, 0))
+
+    def _build_step3_sender(self, parent):
+        configs = [("发件人邮箱:", self.sender_email), ("授权码:", self.sender_password)]
+        for label, var in configs:
+            row = ctk.CTkFrame(parent, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(parent, bg=CARD)
+            row.pack(fill=X, pady=2)
+            if USE_CUSTOMTK:
+                ctk.CTkLabel(row, text=label, width=120, anchor="w", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                             text_color=TEXT_PRIMARY).pack(side=LEFT)
+                show = label.startswith("授权码")
+                entry = ctk.CTkEntry(row, textvariable=var, width=300, height=32, border_width=1,
+                                     border_color=INPUT_BORDER, fg_color=INPUT_BG, text_color=TEXT_PRIMARY,
+                                     font=(FONT_FAMILY, FONT_SIZE_BODY), show="●" if show else "")
+            else:
+                tk.Label(row, text=label, width=16, anchor="w", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                         fg=TEXT_PRIMARY, bg=CARD).pack(side=LEFT)
+                entry = tk.Entry(row, textvariable=var, width=38, font=(FONT_FAMILY, FONT_SIZE_BODY), relief="flat",
+                                 bg=INPUT_BG, fg=TEXT_PRIMARY, show="●" if "授权码" in label else "",
+                                 highlightthickness=1, highlightcolor=INPUT_FOCUS, highlightbackground=INPUT_BORDER)
+            entry.pack(side=LEFT, padx=4)
+
+    def _build_step3_settings(self, parent):
+        settings = [
+            ("发送间隔 (秒):", self.send_interval, 100),
+            ("最大重试次数:", self.max_retries, 100),
+            ("重试间隔 (秒):", self.retry_interval, 100),
+        ]
+        for label, var, w in settings:
+            row = ctk.CTkFrame(parent, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(parent, bg=CARD)
+            row.pack(fill=X, pady=2)
+            if USE_CUSTOMTK:
+                ctk.CTkLabel(row, text=label, width=140, anchor="w", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                             text_color=TEXT_PRIMARY).pack(side=LEFT)
+                ctk.CTkEntry(row, textvariable=var, width=w, height=32, border_width=1,
+                             border_color=INPUT_BORDER, fg_color=INPUT_BG, text_color=TEXT_PRIMARY,
+                             font=(FONT_FAMILY, FONT_SIZE_BODY)).pack(side=LEFT, padx=4)
+            else:
+                tk.Label(row, text=label, width=20, anchor="w", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                         fg=TEXT_PRIMARY, bg=CARD).pack(side=LEFT)
+                tk.Entry(row, textvariable=var, width=w // 8, font=(FONT_FAMILY, FONT_SIZE_BODY), relief="flat",
+                         bg=INPUT_BG, fg=TEXT_PRIMARY, highlightthickness=1, highlightcolor=INPUT_FOCUS,
+                         highlightbackground=INPUT_BORDER).pack(side=LEFT, padx=4)
+
+    def create_step4(self):
+        if USE_CUSTOMTK:
+            frame = ctk.CTkFrame(self.content_frame, fg_color=BG)
+        else:
+            frame = tk.Frame(self.content_frame, bg=BG)
+        self._card(frame, "发送进度", self._build_step4_progress)
+        self._card(frame, "发送日志", self._build_step4_log)
+        self._build_step4_controls(frame)
+        return frame
+
+    def _build_step4_progress(self, parent):
+        if USE_CUSTOMTK:
+            self.progress_label = ctk.CTkLabel(parent, text="等待发送…", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                                               text_color=TEXT_SECONDARY, anchor="w")
+            self.progress_label.pack(fill=X, pady=(0, 4))
+            self.progress_bar = ctk.CTkProgressBar(parent, width=400, height=16, corner_radius=8,
+                                                    fg_color=BG, progress_color=PRIMARY, border_width=0)
+        else:
+            self.progress_label = tk.Label(parent, text="等待发送…", font=(FONT_FAMILY, FONT_SIZE_BODY),
+                                           fg=TEXT_SECONDARY, bg=CARD, anchor="w")
+            self.progress_label.pack(fill=X, pady=(0, 4))
+            self.progress_bar = ttk.Progressbar(parent, orient=HORIZONTAL, length=400, mode="determinate")
+        self.progress_bar.pack(fill=X, pady=(0, 4))
+        if USE_CUSTOMTK:
+            self.progress_bar.set(0)
+
+    def _build_step4_log(self, parent):
+        self.log_widget = ScrolledText(parent, height=14, font=("Consolas", FONT_SIZE_SMALL), wrap=WORD,
+                                       bg="#1E1E1E", fg="#D4D4D4", relief="flat", insertbackground="#D4D4D4",
+                                       padx=8, pady=8)
+        self.log_widget.pack(fill=BOTH, expand=True, pady=(0, 4))
+        self.log_widget.configure(state="disabled")
+
+    def _build_step4_controls(self, parent):
+        if USE_CUSTOMTK:
+            bar = ctk.CTkFrame(parent, fg_color="transparent")
+            bar.pack(fill=X, padx=24, pady=6)
+            self.pause_btn = ctk.CTkButton(bar, text="暂停", width=80, height=36, corner_radius=BORDER_RADIUS,
+                                           fg_color=WARNING, hover_color="#E07B00", text_color="white",
+                                           font=(FONT_FAMILY, FONT_SIZE_BUTTON), command=self.toggle_pause, state="disabled")
+            self.pause_btn.pack(side=LEFT, padx=4)
+            self.stop_btn = ctk.CTkButton(bar, text="停止", width=80, height=36, corner_radius=BORDER_RADIUS,
+                                          fg_color=ERROR, hover_color="#B02A30", text_color="white",
+                                          font=(FONT_FAMILY, FONT_SIZE_BUTTON), command=self.stop_send, state="disabled")
+            self.stop_btn.pack(side=LEFT, padx=4)
+            ctk.CTkButton(bar, text="导出失败记录", width=120, height=36, corner_radius=BORDER_RADIUS,
+                          fg_color=TEXT_SECONDARY, hover_color="#4A4A4A", text_color="white",
+                          font=(FONT_FAMILY, FONT_SIZE_BUTTON), command=self.export_failed).pack(side=RIGHT, padx=4)
+        else:
+            bar = tk.Frame(parent, bg=BG)
+            bar.pack(fill=X, padx=24, pady=6)
+            self.pause_btn = tk.Button(bar, text="暂停", bg=WARNING, fg="white", relief="flat",
+                                       font=(FONT_FAMILY, FONT_SIZE_BUTTON), activebackground="#E07B00",
+                                       command=self.toggle_pause, state="disabled")
+            self.pause_btn.pack(side=LEFT, padx=4)
+            self.stop_btn = tk.Button(bar, text="停止", bg=ERROR, fg="white", relief="flat",
+                                      font=(FONT_FAMILY, FONT_SIZE_BUTTON), activebackground="#B02A30",
+                                      command=self.stop_send, state="disabled")
+            self.stop_btn.pack(side=LEFT, padx=4)
+            tk.Button(bar, text="导出失败记录", bg=TEXT_SECONDARY, fg="white", relief="flat",
+                      font=(FONT_FAMILY, FONT_SIZE_BUTTON), activebackground="#4A4A4A",
+                      command=self.export_failed).pack(side=RIGHT, padx=4)
+
+    # --------------------------------------------------- navigation
+    def show_step(self, index):
+        for f in self.step_frames:
+            f.pack_forget()
+        self.step_frames[index].pack(fill=BOTH, expand=True)
+        self.current_step = index
+        self._update_step_buttons()
+        self._update_nav_buttons()
+
+    def _update_nav_buttons(self):
+        is_first = self.current_step == 0
+        is_last = self.current_step == len(self.step_frames) - 1
+        if USE_CUSTOMTK:
+            self.prev_btn.configure(state="disabled" if is_first else "normal")
+            if is_last:
+                self.next_btn.pack_forget()
+                self.send_btn.pack(side=RIGHT)
+            else:
+                self.send_btn.pack_forget()
+                self.next_btn.pack(side=RIGHT)
+        else:
+            self.prev_btn.configure(state="disabled" if is_first else "normal")
+            if is_last:
+                self.next_btn.pack_forget()
+                self.send_btn.pack(side=RIGHT)
+            else:
+                self.send_btn.pack_forget()
+                self.next_btn.pack(side=RIGHT)
+
+    def go_to_step(self, index):
+        if index < 0 or index >= len(self.step_frames):
+            return
+        if index > self.current_step + 1:
+            return
+        if index > self.current_step:
+            for s in range(self.current_step, index):
+                if not self.validate_step(s):
+                    return
+        self.show_step(index)
 
     def prev_step(self):
-        if self.current_step > 1:
+        if self.current_step > 0:
             self.show_step(self.current_step - 1)
 
     def next_step(self):
-        if self.validate_step(self.current_step):
-            self.show_step(self.current_step + 1)
+        if self.current_step < len(self.step_frames) - 1:
+            if self.validate_step(self.current_step):
+                self.show_step(self.current_step + 1)
 
-    def start_send(self):
-        if not self.validate_step(3):
+    def validate_step(self, index):
+        if index == 0:
+            if not self.folder_path.get().strip():
+                messagebox.showwarning("提示", "请选择附件文件夹路径")
+                return False
+            if not os.path.isdir(self.folder_path.get().strip()):
+                messagebox.showerror("错误", "附件文件夹路径不存在")
+                return False
+            if not self.excel_path.get().strip():
+                messagebox.showwarning("提示", "请选择 Excel 文件路径")
+                return False
+            if not os.path.isfile(self.excel_path.get().strip()):
+                messagebox.showerror("错误", "Excel 文件不存在")
+                return False
+            if self.column_mapping.get_column_index("email") < 0:
+                messagebox.showwarning("提示", "请配置邮箱列映射")
+                return False
+            return True
+        if index == 1:
+            if not self.subject_var.get().strip():
+                messagebox.showwarning("提示", "请输入邮件主题")
+                return False
+            body = self.body_widget.get("1.0", "end-1c")
+            if not body.strip():
+                messagebox.showwarning("提示", "请输入邮件正文")
+                return False
+            return True
+        if index == 2:
+            if not self.smtp_server.get().strip():
+                messagebox.showwarning("提示", "请输入 SMTP 服务器地址")
+                return False
+            try:
+                port = self.smtp_port.get()
+                if not (1 <= port <= 65535):
+                    messagebox.showwarning("提示", "端口号必须在 1-65535 之间")
+                    return False
+            except Exception:
+                messagebox.showwarning("提示", "端口号必须是有效的数字")
+                return False
+            if not self.sender_email.get().strip():
+                messagebox.showwarning("提示", "请输入发件人邮箱")
+                return False
+            if not self.sender_password.get().strip():
+                messagebox.showwarning("提示", "请输入授权码")
+                return False
+            if not self.validate_interval() or not self.validate_retries():
+                return False
+            return True
+        return True
+
+    # ------------------------------------------------- step1 actions
+    def browse_folder(self):
+        path = filedialog.askdirectory(title="选择附件文件夹")
+        if path:
+            self.folder_path.set(path)
+
+    def browse_excel(self):
+        path = filedialog.askopenfilename(title="选择 Excel 文件", filetypes=[("Excel 文件", "*.xlsx *.xls")])
+        if path:
+            self.excel_path.set(path)
+            self.load_columns()
+
+    def load_columns(self):
+        path = self.excel_path.get().strip()
+        if not path or not os.path.isfile(path):
+            messagebox.showerror("错误", "请先选择有效的 Excel 文件")
             return
-        
-        matched_results = [r for r in self.match_results if r['status'] == 'matched']
-        if not matched_results:
-            messagebox.showwarning("警告", "没有匹配到任何收件人！\n请在步骤1中点击'加载预览'按钮，确保文件和收件人匹配成功。")
+        try:
+            self.column_mapping.load_from_excel(path)
+            self._build_mapping_widgets()
+            self.load_preview()
+        except Exception as e:
+            messagebox.showerror("错误", f"加载 Excel 失败: {e}")
+
+    def load_preview(self):
+        for w in self.preview_container.winfo_children():
+            w.destroy()
+        folder = self.folder_path.get().strip()
+        if not folder or not os.path.isdir(folder):
+            if self.preview_hint:
+                self.preview_hint.configure(text="请先选择有效的附件文件夹")
+            return
+        if not self.column_mapping.headers:
+            if self.preview_hint:
+                self.preview_hint.configure(text="请先加载 Excel 文件并配置列映射")
+            return
+        if not self.column_mapping.mapping:
+            if self.preview_hint:
+                self.preview_hint.configure(text="请先配置关键列映射")
+            return
+        key_field_name = self.column_mapping.get_key_field_name()
+        matcher = RecipientMatcher(folder, self.column_mapping, key_field_name)
+        self.match_results = matcher.match_files()
+        matched = [r for r in self.match_results if r["matched"]]
+        not_matched = [r for r in self.match_results if not r["matched"]]
+        if self.preview_hint:
+            if matched:
+                self.preview_hint.configure(
+                    text=f"共 {len(self.match_results)} 个文件，匹配成功 {len(matched)} 个，未匹配 {len(not_matched)} 个",
+                    text_color=SUCCESS if USE_CUSTOMTK else SUCCESS)
+            else:
+                self.preview_hint.configure(
+                    text=f"共 {len(self.match_results)} 个文件，无匹配收件人！请检查列映射和文件名",
+                    text_color=WARNING if USE_CUSTOMTK else WARNING)
+        headers = ["文件名", "关键值", "收件人", "状态"]
+        if USE_CUSTOMTK:
+            header_row = ctk.CTkFrame(self.preview_container, fg_color=PRIMARY)
+            header_row.pack(fill=X, pady=(0, 2))
+            for h in headers:
+                ctk.CTkLabel(header_row, text=h, font=(FONT_FAMILY, FONT_SIZE_SMALL, "bold"),
+                             text_color="white", width=120, anchor="w").pack(side=LEFT, padx=4, pady=2)
+        else:
+            header_row = tk.Frame(self.preview_container, bg=PRIMARY)
+            header_row.pack(fill=X, pady=(0, 2))
+            for h in headers:
+                tk.Label(header_row, text=h, font=(FONT_FAMILY, FONT_SIZE_SMALL, "bold"),
+                         fg="white", bg=PRIMARY, width=16, anchor="w").pack(side=LEFT, padx=4, pady=2)
+        email_idx = self.column_mapping.get_column_index("email")
+        name_idx = self.column_mapping.get_column_index("name")
+        for r in self.match_results:
+            row_bg = CARD
+            if USE_CUSTOMTK:
+                row_frame = ctk.CTkFrame(self.preview_container, fg_color=row_bg, corner_radius=4)
+            else:
+                row_frame = tk.Frame(self.preview_container, bg=row_bg)
+            row_frame.pack(fill=X, pady=1)
+            ctk_or_tk_label = ctk.CTkLabel if USE_CUSTOMTK else tk.Label
+            label_kwargs = {"font": (FONT_FAMILY, FONT_SIZE_SMALL)}
+            if not USE_CUSTOMTK:
+                label_kwargs["bg"] = row_bg
+            ctk_or_tk_label(row_frame, text=r["filename"], width=160, anchor="w",
+                            text_color=TEXT_PRIMARY, **label_kwargs).pack(side=LEFT, padx=4)
+            ctk_or_tk_label(row_frame, text=r.get("key", ""), width=80, anchor="w",
+                            text_color=TEXT_SECONDARY, **label_kwargs).pack(side=LEFT, padx=4)
+            if r["matched"]:
+                row_idx = r["row_idx"]
+                name_val = ""
+                email_val = ""
+                if row_idx is not None and name_idx >= 0:
+                    data = self.column_mapping.data
+                    if row_idx < len(data) and name_idx < len(data[row_idx]):
+                        name_val = str(data[row_idx][name_idx] or "")
+                if row_idx is not None and email_idx >= 0:
+                    data = self.column_mapping.data
+                    if row_idx < len(data) and email_idx < len(data[row_idx]):
+                        email_val = str(data[row_idx][email_idx] or "")
+                recipient_text = f"{name_val} <{email_val}>" if email_val else name_val
+                ctk_or_tk_label(row_frame, text=recipient_text, width=200, anchor="w",
+                                text_color=TEXT_PRIMARY, **label_kwargs).pack(side=LEFT, padx=4)
+                status_color = SUCCESS
+                status_text = "匹配成功"
+            else:
+                ctk_or_tk_label(row_frame, text="", width=200, anchor="w",
+                                text_color=TEXT_SECONDARY, **label_kwargs).pack(side=LEFT, padx=4)
+                status_color = WARNING
+                status_text = "未匹配"
+            if USE_CUSTOMTK:
+                ctk_or_tk_label(row_frame, text=status_text, width=80, anchor="w",
+                                text_color=status_color, **label_kwargs).pack(side=LEFT, padx=4)
+            else:
+                tk.Label(row_frame, text=status_text, width=12, anchor="w",
+                         fg=status_color, bg=row_bg, font=(FONT_FAMILY, FONT_SIZE_SMALL)).pack(side=LEFT, padx=4)
+
+    # ------------------------------------------------- step2 actions
+    def insert_var(self, var):
+        if self.body_widget:
+            self.body_widget.insert("insert", var)
+
+    def insert_var_to_subject(self, var):
+        current = self.subject_var.get()
+        self.subject_var.set(current + var)
+
+    def _get_sel(self):
+        try:
+            sel = self.body_widget.tag_ranges("sel")
+            return (sel[0], sel[1]) if sel else None
+        except Exception:
+            return None
+
+    def _get_font_style_state(self, tags):
+        font_str = "normal"
+        underline = False
+        try:
+            if "font_style" in tags:
+                font_cfg = self.body_widget.tag_cget("font_style", "font")
+                if font_cfg:
+                    parts = str(font_cfg).split()
+                    if len(parts) >= 3:
+                        font_str = parts[2] if len(parts) > 2 else "normal"
+                underline_cfg = self.body_widget.tag_cget("font_style", "underline")
+                underline = str(underline_cfg) == "1"
+        except Exception:
+            pass
+        styles = set(font_str.split()) if font_str != "normal" else set()
+        return {"bold": "bold" in styles, "italic": "italic" in styles, "underline": underline}
+
+    def _apply_combined_font_tag(self, target_tag):
+        if not self.body_widget:
+            return
+        try:
+            sel = self._get_sel()
+            if not sel:
+                return
+            start, end = sel
+            sample_pos = start
+            current_tags = self.body_widget.tag_names(sample_pos)
+            state = self._get_font_style_state(current_tags)
+            if target_tag == "bold":
+                state["bold"] = not state["bold"]
+            elif target_tag == "italic":
+                state["italic"] = not state["italic"]
+            elif target_tag == "underline":
+                state["underline"] = not state["underline"]
+            self.body_widget.tag_remove("font_style", start, end)
+            combo_parts = []
+            if state["bold"]:
+                combo_parts.append("bold")
+            if state["italic"]:
+                combo_parts.append("italic")
+            font_style = " ".join(combo_parts) if combo_parts else "normal"
+            self.body_widget.tag_configure("font_style", font=(FONT_FAMILY, FONT_SIZE_BODY, font_style),
+                                          underline=state["underline"])
+            self.body_widget.tag_add("font_style", start, end)
+        except Exception:
+            pass
+
+    def format_bold(self):
+        self._apply_combined_font_tag("bold")
+
+    def format_italic(self):
+        self._apply_combined_font_tag("italic")
+
+    def format_underline(self):
+        self._apply_combined_font_tag("underline")
+
+    def format_align_left(self):
+        if not self.body_widget:
+            return
+        try:
+            sel = self._get_sel()
+            if sel:
+                start, end = sel
+                self.body_widget.tag_remove("align_right", start, end)
+                self.body_widget.tag_remove("align_center", start, end)
+                self.body_widget.tag_add("align_left", start, end)
+            else:
+                line = self.body_widget.index("insert").split(".")[0]
+                line_start = f"{line}.0"
+                line_end = f"{line}.end"
+                self.body_widget.tag_remove("align_right", line_start, line_end)
+                self.body_widget.tag_remove("align_center", line_start, line_end)
+                self.body_widget.tag_add("align_left", line_start, line_end)
+        except Exception:
+            pass
+
+    def format_align_center(self):
+        if not self.body_widget:
+            return
+        try:
+            sel = self._get_sel()
+            if sel:
+                start, end = sel
+                self.body_widget.tag_remove("align_left", start, end)
+                self.body_widget.tag_remove("align_right", start, end)
+                self.body_widget.tag_add("align_center", start, end)
+            else:
+                line = self.body_widget.index("insert").split(".")[0]
+                line_start = f"{line}.0"
+                line_end = f"{line}.end"
+                self.body_widget.tag_remove("align_left", line_start, line_end)
+                self.body_widget.tag_remove("align_right", line_start, line_end)
+                self.body_widget.tag_add("align_center", line_start, line_end)
+        except Exception:
+            pass
+
+    def format_align_right(self):
+        if not self.body_widget:
+            return
+        try:
+            sel = self._get_sel()
+            if sel:
+                start, end = sel
+                self.body_widget.tag_remove("align_left", start, end)
+                self.body_widget.tag_remove("align_center", start, end)
+                self.body_widget.tag_add("align_right", start, end)
+            else:
+                line = self.body_widget.index("insert").split(".")[0]
+                line_start = f"{line}.0"
+                line_end = f"{line}.end"
+                self.body_widget.tag_remove("align_left", line_start, line_end)
+                self.body_widget.tag_remove("align_center", line_start, line_end)
+                self.body_widget.tag_add("align_right", line_start, line_end)
+        except Exception:
+            pass
+
+    def format_font_size(self, size_name):
+        if not self.body_widget:
+            return
+        size_map = {"小": "size_small", "正常": "size_normal", "大": "size_large", "较大": "size_xlarge", "特大": "size_xxlarge"}
+        tag = size_map.get(size_name, "size_normal")
+        try:
+            sel = self._get_sel()
+            if sel:
+                start, end = sel
+                for t in ["size_small", "size_normal", "size_large", "size_xlarge", "size_xxlarge"]:
+                    self.body_widget.tag_remove(t, start, end)
+                self.body_widget.tag_add(tag, start, end)
+        except Exception:
+            pass
+
+    def format_text_color(self, color_name):
+        if not self.body_widget:
+            return
+        color_map = {"默认": TEXT_PRIMARY, "红色": "#D13438", "蓝色": "#0078D4", "绿色": "#107C10", "橙色": "#FF8C00", "紫色": "#8764B8", "黑色": "#1A1A1A"}
+        color = color_map.get(color_name, TEXT_PRIMARY)
+        try:
+            sel = self._get_sel()
+            if sel:
+                start, end = sel
+                for t in list(self.body_widget.tag_names()):
+                    if t.startswith("fgcolor_"):
+                        self.body_widget.tag_remove(t, start, end)
+                fg_tag = f"fgcolor_{color}"
+                try:
+                    self.body_widget.tag_cget(fg_tag, "foreground")
+                except Exception:
+                    self.body_widget.tag_configure(fg_tag, foreground=color)
+                self.body_widget.tag_add(fg_tag, start, end)
+        except Exception:
+            pass
+
+    def format_first_line_indent(self):
+        if not self.body_widget:
+            return
+        try:
+            sel = self._get_sel()
+            if sel:
+                start, end = sel
+                current_tags = self.body_widget.tag_names(start)
+                if "indented" in current_tags:
+                    self.body_widget.tag_remove("indented", start, end)
+                else:
+                    self.body_widget.tag_add("indented", start, end)
+            else:
+                line = self.body_widget.index("insert").split(".")[0]
+                line_start = f"{line}.0"
+                line_end = f"{line}.end"
+                current_tags = self.body_widget.tag_names(line_start)
+                if "indented" in current_tags:
+                    self.body_widget.tag_remove("indented", line_start, line_end)
+                else:
+                    self.body_widget.tag_add("indented", line_start, line_end)
+        except Exception:
+            pass
+
+    def clear_formatting(self):
+        if not self.body_widget:
+            return
+        try:
+            tags = ["font_style", "align_left", "align_center", "align_right", "indented",
+                    "size_small", "size_normal", "size_large", "size_xlarge", "size_xxlarge"]
+            sel = self._get_sel()
+            if sel:
+                start, end = sel
+                for tag in tags:
+                    self.body_widget.tag_remove(tag, start, end)
+                for t in list(self.body_widget.tag_names()):
+                    if t.startswith("fgcolor_"):
+                        self.body_widget.tag_remove(t, start, end)
+            else:
+                for tag in tags:
+                    self.body_widget.tag_remove(tag, "1.0", "end")
+                for t in list(self.body_widget.tag_names()):
+                    if t.startswith("fgcolor_"):
+                        self.body_widget.tag_remove(t, "1.0", "end")
+        except Exception:
+            pass
+
+    def get_formatted_body_html(self):
+        text = self.body_widget.get("1.0", "end-1c")
+        lines = text.split("\n")
+        html_parts = []
+        for i, line in enumerate(lines):
+            if not line.strip():
+                html_parts.append("<br>")
+                continue
+            line_num = i + 1
+            chars = list(line)
+            align_right_positions = set()
+            align_center_positions = set()
+            indent_positions = set()
+            bold_positions = set()
+            italic_positions = set()
+            underline_positions = set()
+            size_positions = {}
+            color_positions = {}
+            size_tags = ["size_small", "size_normal", "size_large", "size_xlarge", "size_xxlarge"]
+            for j in range(len(chars)):
+                pos = f"{line_num}.{j}"
+                try:
+                    tags = self.body_widget.tag_names(pos)
+                    if "align_right" in tags:
+                        align_right_positions.add(j)
+                    if "align_center" in tags:
+                        align_center_positions.add(j)
+                    if "indented" in tags:
+                        indent_positions.add(j)
+                    if "font_style" in tags:
+                        try:
+                            font_cfg = str(self.body_widget.tag_cget("font_style", "font"))
+                            parts = font_cfg.split()
+                            font_style_str = parts[2] if len(parts) >= 3 else "normal"
+                            style_set = set(font_style_str.split()) if font_style_str != "normal" else set()
+                            if "bold" in style_set:
+                                bold_positions.add(j)
+                            if "italic" in style_set:
+                                italic_positions.add(j)
+                            underline_cfg = self.body_widget.tag_cget("font_style", "underline")
+                            if str(underline_cfg) == "1":
+                                underline_positions.add(j)
+                        except Exception:
+                            pass
+                    for st in size_tags:
+                        if st in tags:
+                            size_positions[j] = st
+                            break
+                    for t in tags:
+                        if t.startswith("fgcolor_"):
+                            color_positions[j] = t.replace("fgcolor_", "")
+                            break
+                except Exception:
+                    pass
+            has_right = len(align_right_positions) > len(chars) // 2 if chars else False
+            has_center = len(align_center_positions) > len(chars) // 2 if chars else False
+            has_indent = len(indent_positions) > len(chars) // 2 if chars else False
+            result = ""
+            current_state = {"bold": False, "italic": False, "underline": False}
+            for j, char in enumerate(chars):
+                want_bold = j in bold_positions
+                want_italic = j in italic_positions
+                want_underline = j in underline_positions
+                if want_bold != current_state["bold"] or want_italic != current_state["italic"] or want_underline != current_state["underline"]:
+                    if any(current_state[k] for k in ("bold", "italic", "underline")):
+                        result += "</span>"
+                    current_state["bold"] = want_bold
+                    current_state["italic"] = want_italic
+                    current_state["underline"] = want_underline
+                    if any(current_state[k] for k in ("bold", "italic", "underline")):
+                        style_parts = []
+                        if current_state["bold"]:
+                            style_parts.append("font-weight:bold")
+                        if current_state["italic"]:
+                            style_parts.append("font-style:italic")
+                        if current_state["underline"]:
+                            style_parts.append("text-decoration:underline")
+                        result += f'<span style="{";".join(style_parts)}">'
+                escaped = char.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                result += escaped
+            if any(current_state[k] for k in ("bold", "italic", "underline")):
+                result += "</span>"
+            p_style = ""
+            if has_right:
+                p_style = "text-align:right;"
+            elif has_center:
+                p_style = "text-align:center;"
+            elif has_indent:
+                p_style = "text-indent:2em;"
+            if p_style:
+                html_parts.append(f'<p style="{p_style}">{result}</p>')
+            else:
+                html_parts.append(f"<p>{result}</p>")
+        return "\n".join(html_parts)
+
+    # ------------------------------------------------- step3 actions
+    def test_connection(self):
+        server_addr = self.smtp_server.get().strip()
+        port = self.smtp_port.get()
+        tls = self.use_tls.get()
+        email = self.sender_email.get().strip()
+        pwd = self.sender_password.get().strip()
+        if not email or not pwd:
+            messagebox.showwarning("提示", "请填写发件人邮箱和授权码")
             return
 
-        self.sending = True
-        self.paused = False
-        self.stop_event.clear()
+        def _test():
+            try:
+                self.root.after(0, lambda: self.log_message(f"正在测试连接 {server_addr}:{port} ..."))
+                srv = smtplib.SMTP(server_addr, port, timeout=15)
+                if tls:
+                    srv.starttls()
+                srv.login(email, pwd)
+                srv.quit()
+                self.root.after(0, lambda: self.log_message("SMTP 连接测试成功!"))
+                self.root.after(0, lambda: messagebox.showinfo("成功", "SMTP 连接测试成功!"))
+            except Exception as e:
+                err = str(e)
+                self.root.after(0, lambda: self.log_message(f"SMTP 连接测试失败: {err}"))
+                self.root.after(0, lambda: messagebox.showerror("失败", f"SMTP 连接测试失败:\n{err}"))
 
-        self.btn_pause.config(state='normal', text='暂停')
-        self.btn_stop.config(state='normal')
-        self.btn_send.config(state='disabled')
+        threading.Thread(target=_test, daemon=True).start()
 
-        self.text_log.delete('1.0', 'end')
-        self.label_stats.config(text=f"总计: {len(matched_results)}  成功: 0  失败: 0")
-        self.progress_bar['value'] = 0
-
-        subject = self.entry_subject.get().strip()
-        body = self.text_body.get('1.0', 'end').strip()
-
-        self.send_interval = int(self.entry_interval.get() or 3)
-        self.max_retries = int(self.entry_retries.get() or 3)
-
-        thread = threading.Thread(target=self.send_emails, args=(subject, body))
-        thread.daemon = True
-        thread.start()
-
-    def send_emails(self, subject, body):
-        total = len(self.match_results)
-        matched_results = [r for r in self.match_results if r['status'] == 'matched']
-
-        success_count = 0
-        fail_count = 0
-        
-        body_html_template = self.get_formatted_body_html()
-        
-        def check_stop():
-            if self.stop_event.is_set():
-                return True
-            self.root.update() if hasattr(self, 'root') else None
+    def validate_interval(self):
+        try:
+            val = self.send_interval.get()
+            if val < 0:
+                raise ValueError
+            return True
+        except Exception:
+            messagebox.showwarning("提示", "发送间隔必须为非负数")
             return False
 
-        for i, result in enumerate(matched_results):
-            if check_stop():
-                self.log_message("发送已停止")
+    def validate_retries(self):
+        try:
+            val = self.max_retries.get()
+            if val < 0:
+                raise ValueError
+            val2 = self.retry_interval.get()
+            if val2 < 0:
+                raise ValueError
+            return True
+        except Exception:
+            messagebox.showwarning("提示", "重试次数和重试间隔必须为非负整数")
+            return False
+
+    # ------------------------------------------------- step4 actions
+    def start_send(self):
+        if self.is_sending:
+            return
+        for step_idx in range(3):
+            if not self.validate_step(step_idx):
+                self.show_step(step_idx)
+                return
+        self.show_step(3)
+        self.stop_event.clear()
+        self.pause_event.set()
+        self.is_sending = True
+        self.success_count = 0
+        self.fail_count = 0
+        self.failed_records = []
+        self._update_send_controls(True)
+        self.send_thread = threading.Thread(target=self.send_emails, daemon=True)
+        self.send_thread.start()
+
+    def _update_send_controls(self, sending):
+        state = "normal" if sending else "disabled"
+        try:
+            self.pause_btn.configure(state=state)
+            self.stop_btn.configure(state=state)
+        except Exception:
+            pass
+
+    def send_emails(self):
+        folder = self.folder_path.get().strip()
+        matcher = RecipientMatcher(folder, self.column_mapping, self.column_mapping.get_key_field_name())
+        matched = matcher.match_files()
+        targets = [m for m in matched if m["matched"]]
+        self.total_count = len(targets)
+
+        if self.total_count == 0:
+            self.root.after(0, lambda: self.log_message("没有找到匹配的文件，请检查列映射配置"))
+            self.root.after(0, self.on_send_complete)
+            return
+
+        self.root.after(0, lambda: self.log_message(f"共 {self.total_count} 个文件待发送"))
+
+        email_idx = self.column_mapping.get_column_index("email")
+        name_idx = self.column_mapping.get_column_index("name")
+        subject_tpl = self.subject_var.get()
+        body_html = self.get_formatted_body_html()
+
+        interval = self.send_interval.get()
+        retries = self.max_retries.get()
+        retry_int = self.retry_interval.get()
+        smtp_cfg = {
+            "smtp_server": self.smtp_server.get().strip(),
+            "smtp_port": self.smtp_port.get(),
+            "use_tls": self.use_tls.get(),
+            "sender_email": self.sender_email.get().strip(),
+            "sender_password": self.sender_password.get().strip(),
+        }
+
+        for i, item in enumerate(targets):
+            if self.stop_event.is_set():
+                self.root.after(0, lambda: self.log_message("发送已停止"))
                 break
+            self.pause_event.wait()
 
-            while self.paused and not self.stop_event.is_set():
-                time.sleep(0.2)
-            
-            if check_stop():
-                self.log_message("发送已停止")
-                break
+            row_idx = item["row_idx"]
+            data_row = self.column_mapping.data[row_idx] if row_idx is not None and row_idx < len(self.column_mapping.data) else None
+            recipient_email = ""
+            recipient_name = ""
+            if data_row:
+                if 0 <= email_idx < len(data_row) and data_row[email_idx]:
+                    recipient_email = str(data_row[email_idx]).strip()
+                if 0 <= name_idx < len(data_row) and data_row[name_idx]:
+                    recipient_name = str(data_row[name_idx]).strip()
 
-            recipient = result['recipient']
-            filename = result['file']
-            filepath = result['filepath']
+            if not recipient_email:
+                self.fail_count += 1
+                self.failed_records.append({
+                    "文件名": item["filename"], "关键值": item["key"],
+                    "姓名": recipient_name, "邮箱": "", "错误": "邮箱地址为空",
+                    "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                self.root.after(0, lambda fn=item["filename"]: self.log_message(f"跳过 {fn}: 邮箱地址为空"))
+                self._update_progress(i + 1)
+                continue
 
-            self.log_message(f"发送中: {recipient['name']} <{recipient['email']}>")
+            subject = subject_tpl
+            body = body_html
+            replace_map = {"{姓名}": recipient_name, "{学号}": item["key"], "{邮箱}": recipient_email}
+            for cv in self.custom_vars:
+                replace_map[f"{{{cv['name']}}}"] = cv["value"]
+            for k, v in replace_map.items():
+                subject = subject.replace(k, v)
+                body = body.replace(k, v)
 
-            personalized_subject = subject.replace('【姓名】', recipient['name'])
-            personalized_body_plain = body.replace('【姓名】', recipient['name'])
-            personalized_body_plain = personalized_body_plain.replace('【邮箱】', recipient['email'])
-            
-            personalized_body_html = body_html_template.replace('【姓名】', recipient['name'])
-            personalized_body_html = personalized_body_html.replace('【邮箱】', recipient['email'])
-
-            email_sent = False
-            for retry in range(self.max_retries):
-                if check_stop():
-                    self.log_message("发送已停止")
+            success = False
+            last_error = ""
+            for attempt in range(retries):
+                if self.stop_event.is_set():
                     break
-                
                 try:
-                    self.send_single_email(
-                        self.smtp_config['server'],
-                        self.smtp_config['port'],
-                        self.smtp_config['email'],
-                        self.smtp_config['password'],
-                        self.smtp_config['use_tls'],
-                        recipient['email'],
-                        personalized_subject,
-                        personalized_body_plain,
-                        personalized_body_html,
-                        filepath
-                    )
-                    self.log_message(f"  [OK] 发送成功")
-                    success_count += 1
-                    email_sent = True
+                    self.send_single_email(smtp_cfg, recipient_email, subject, body, item["filepath"])
+                    success = True
                     break
                 except Exception as e:
-                    if check_stop():
-                        break
-                    if retry < self.max_retries - 1:
-                        self.log_message(f"  [RETRY] 重试中... ({retry + 1}/{self.max_retries})")
-                        for wait_time in range(3):
-                            if check_stop():
+                    last_error = str(e)
+                    if attempt < retries - 1:
+                        self.root.after(0, lambda err=last_error, a=attempt + 1: self.log_message(
+                            f"发送失败 (第{a}次): {err}，{retry_int}秒后重试..."))
+                        for _ in range(retry_int * 10):
+                            if self.stop_event.is_set():
                                 break
-                            time.sleep(1)
-                    else:
-                        self.log_message(f"  [FAILED] 发送失败: {str(e)}")
-                        fail_count += 1
-            
-            if check_stop():
-                break
+                            time.sleep(0.1)
 
-            progress = ((i + 1) / len(matched_results)) * 100
-            self.root.after(0, lambda p=progress: self.progress_bar.config(value=p))
-            self.root.after(0, lambda s=success_count, f=fail_count:
-                          self.label_stats.config(text=f"总计: {len(matched_results)}  成功: {s}  失败: {f}"))
+            if success:
+                self.success_count += 1
+                self.root.after(0, lambda fn=item["filename"], rn=recipient_name: self.log_message(
+                    f"✓ 发送成功: {fn} -> {rn}"))
+            else:
+                self.fail_count += 1
+                self.failed_records.append({
+                    "文件名": item["filename"], "关键值": item["key"],
+                    "姓名": recipient_name, "邮箱": recipient_email, "错误": last_error,
+                    "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                self.root.after(0, lambda fn=item["filename"], err=last_error: self.log_message(
+                    f"✗ 发送失败: {fn} - {err}"))
 
-            if i < len(matched_results) - 1 and not self.stop_event.is_set():
-                for wait_time in range(self.send_interval):
-                    if check_stop():
+            self._update_progress(i + 1)
+
+            if i < len(targets) - 1 and not self.stop_event.is_set():
+                for _ in range(int(interval * 10)):
+                    if self.stop_event.is_set():
                         break
-                    time.sleep(1)
+                    time.sleep(0.1)
 
         self.root.after(0, self.on_send_complete)
-        self.log_message(f"\n发送完成！成功: {success_count}, 失败: {fail_count}")
 
-    def send_single_email(self, server, port, email, password, use_tls, recipient, subject, body_plain, body_html, attachment_path):
-        msg = MIMEMultipart('alternative')
-        msg['From'] = email
-        msg['To'] = recipient
-        msg['Subject'] = Header(subject, 'utf-8').encode()
-        
-        msg.attach(MIMEText(body_plain, 'plain', 'utf-8'))
-        
-        html_content = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-body {{ font-family: Arial, sans-serif; line-height: 1.6; }}
-p {{ margin: 0.5em 0; }}
-</style>
-</head>
-<body>
-{body_html}
-</body>
-</html>"""
-        msg.attach(MIMEText(html_content, 'html', 'utf-8'))
+    def send_single_email(self, smtp_config, recipient, subject, body_html, attachment_path=None):
+        msg = MIMEMultipart("mixed")
+        msg["From"] = smtp_config["sender_email"]
+        msg["To"] = recipient
+        msg["Subject"] = Header(subject, "utf-8").encode()
 
-        if attachment_path and os.path.exists(attachment_path):
-            with open(attachment_path, 'rb') as f:
+        alt_part = MIMEMultipart("alternative")
+        plain_text = re.sub(r"<[^>]+>", "", body_html)
+        alt_part.attach(MIMEText(plain_text, "plain", "utf-8"))
+        alt_part.attach(MIMEText(body_html, "html", "utf-8"))
+        msg.attach(alt_part)
+
+        if attachment_path and os.path.isfile(attachment_path):
+            with open(attachment_path, "rb") as f:
                 part = MIMEApplication(f.read(), Name=os.path.basename(attachment_path))
-            part['Content-Disposition'] = f'attachment; filename="{os.path.basename(attachment_path)}"'
+            part.add_header("Content-Disposition", "attachment", filename=("utf-8", "", os.path.basename(attachment_path)))
             msg.attach(part)
 
-        if use_tls:
-            server_conn = smtplib.SMTP(server, port, timeout=30)
-            server_conn.starttls()
-        else:
-            server_conn = smtplib.SMTP(server, port, timeout=30)
+        server = None
+        try:
+            port = smtp_config.get("smtp_port", 587)
+            timeout_val = 30
+            if port == 465:
+                server = smtplib.SMTP_SSL(smtp_config["smtp_server"], port, timeout=timeout_val)
+            else:
+                server = smtplib.SMTP(smtp_config["smtp_server"], port, timeout=timeout_val)
+                if smtp_config.get("use_tls", True):
+                    server.starttls()
+            server.login(smtp_config["sender_email"], smtp_config["sender_password"])
+            server.sendmail(smtp_config["sender_email"], [recipient], msg.as_string())
+        finally:
+            if server:
+                try:
+                    server.quit()
+                except Exception:
+                    pass
 
-        server_conn.login(email, password)
-        server_conn.sendmail(email, [recipient], msg.as_string())
-        server_conn.quit()
+    def _update_progress(self, current):
+        total = max(self.total_count, 1)
+        pct = current / total
+        self.root.after(0, lambda: self._set_progress(pct, current))
+
+    def _set_progress(self, pct, current):
+        if USE_CUSTOMTK:
+            self.progress_bar.set(pct)
+        else:
+            self.progress_bar["value"] = pct * 100
+        self.progress_label.configure(text=f"进度: {current}/{self.total_count}  |  成功: {self.success_count}  |  失败: {self.fail_count}")
 
     def toggle_pause(self):
-        self.paused = not self.paused
-        if self.paused:
-            self.btn_pause.config(text='继续')
-            self.log_message("发送已暂停")
+        if not self.is_sending:
+            return
+        if self.pause_event.is_set():
+            self.pause_event.clear()
+            self.root.after(0, lambda: self.log_message("发送已暂停"))
+            try:
+                self.pause_btn.configure(text="继续")
+            except Exception:
+                pass
         else:
-            self.btn_pause.config(text='暂停')
-            self.log_message("发送继续")
+            self.pause_event.set()
+            self.root.after(0, lambda: self.log_message("发送已继续"))
+            try:
+                self.pause_btn.configure(text="暂停")
+            except Exception:
+                pass
 
     def stop_send(self):
+        if not self.is_sending:
+            return
         self.stop_event.set()
-        self.log_message("正在停止...")
-        self.root.after(100, self.check_stop_status)
-
-    def check_stop_status(self):
-        if self.stop_event.is_set():
-            self.btn_stop.config(state='disabled')
-            self.log_message("正在等待当前操作完成...")
+        self.pause_event.set()
+        self.root.after(0, lambda: self.log_message("正在停止..."))
 
     def on_send_complete(self):
-        self.sending = False
-        self.stop_event.clear()
-        self.btn_pause.config(state='disabled', text='暂停')
-        self.btn_stop.config(state='disabled')
-        self.btn_send.config(state='normal')
-        self.log_message("发送操作已结束")
+        self.is_sending = False
+        self._update_send_controls(False)
+        self.log_message(f"发送完成! 成功: {self.success_count}, 失败: {self.fail_count}")
+        if self.fail_count > 0:
+            messagebox.showwarning("完成", f"发送完成!\n成功: {self.success_count}\n失败: {self.fail_count}\n\n可点击「导出失败记录」保存详情")
+        else:
+            messagebox.showinfo("完成", f"全部发送成功!\n共 {self.success_count} 封")
 
-    def log_message(self, msg):
-        timestamp = time.strftime('%H:%M:%S')
-        self.text_log.insert('end', f"[{timestamp}] {msg}\n")
-        self.text_log.see('end')
+    def log_message(self, message):
+        if not self.log_widget:
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        line = f"[{timestamp}] {message}\n"
+        try:
+            self.log_widget.configure(state="normal")
+            self.log_widget.insert(END, line)
+            self.log_widget.see(END)
+            self.log_widget.configure(state="disabled")
+        except Exception:
+            pass
 
     def export_failed(self):
-        matched_results = [r for r in self.match_results if r['status'] == 'matched']
-        failed_results = [r for r in self.match_results if r['status'] != 'matched']
-
-        if not failed_results:
-            messagebox.showinfo("提示", "没有失败记录需要导出")
+        if not self.failed_records:
+            messagebox.showinfo("提示", "没有失败记录可导出")
             return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("导出失败记录")
+        dialog.geometry("360x200")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        if USE_CUSTOMTK:
+            dialog.configure(fg_color=BG)
+        else:
+            dialog.configure(bg=BG)
+        dlg_frame = ctk.CTkFrame(dialog, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(dialog, bg=BG)
+        dlg_frame.pack(fill=BOTH, expand=True, padx=20, pady=16)
+        if USE_CUSTOMTK:
+            ctk.CTkLabel(dlg_frame, text="请选择导出格式:", font=(FONT_FAMILY, FONT_SIZE_BODY, "bold"),
+                         text_color=TEXT_PRIMARY).pack(pady=(0, 12))
+        else:
+            tk.Label(dlg_frame, text="请选择导出格式:", font=(FONT_FAMILY, FONT_SIZE_BODY, "bold"),
+                     fg=TEXT_PRIMARY, bg=BG).pack(pady=(0, 12))
+        btn_frame = ctk.CTkFrame(dlg_frame, fg_color="transparent") if USE_CUSTOMTK else tk.Frame(dlg_frame, bg=BG)
+        btn_frame.pack(fill=X)
+        def do_export_excel():
+            dialog.destroy()
+            self._export_failed_excel()
+        def do_export_log():
+            dialog.destroy()
+            self._export_failed_log()
+        def do_export_both():
+            dialog.destroy()
+            self._export_failed_excel()
+            self._export_failed_log()
+        if USE_CUSTOMTK:
+            ctk.CTkButton(btn_frame, text="Excel 格式", width=100, height=36, corner_radius=BORDER_RADIUS,
+                          fg_color=PRIMARY, hover_color=PRIMARY_HOVER, text_color="white",
+                          font=(FONT_FAMILY, FONT_SIZE_BUTTON), command=do_export_excel).pack(side=LEFT, padx=4)
+            ctk.CTkButton(btn_frame, text="Log 格式", width=100, height=36, corner_radius=BORDER_RADIUS,
+                          fg_color=SUCCESS, hover_color=SUCCESS_HOVER, text_color="white",
+                          font=(FONT_FAMILY, FONT_SIZE_BUTTON), command=do_export_log).pack(side=LEFT, padx=4)
+            ctk.CTkButton(btn_frame, text="全部导出", width=100, height=36, corner_radius=BORDER_RADIUS,
+                          fg_color=WARNING, hover_color="#E07B00", text_color="white",
+                          font=(FONT_FAMILY, FONT_SIZE_BUTTON, "bold"), command=do_export_both).pack(side=LEFT, padx=4)
+        else:
+            tk.Button(btn_frame, text="Excel 格式", bg=PRIMARY, fg="white", relief="flat", width=12, height=1,
+                      font=(FONT_FAMILY, FONT_SIZE_BUTTON), activebackground=PRIMARY_HOVER,
+                      command=do_export_excel).pack(side=LEFT, padx=4)
+            tk.Button(btn_frame, text="Log 格式", bg=SUCCESS, fg="white", relief="flat", width=12, height=1,
+                      font=(FONT_FAMILY, FONT_SIZE_BUTTON), activebackground=SUCCESS_HOVER,
+                      command=do_export_log).pack(side=LEFT, padx=4)
+            tk.Button(btn_frame, text="全部导出", bg=WARNING, fg="white", relief="flat", width=12, height=1,
+                      font=(FONT_FAMILY, FONT_SIZE_BUTTON, "bold"), activebackground="#E07B00",
+                      command=do_export_both).pack(side=LEFT, padx=4)
 
-        file_path = filedialog.asksaveasfilename(
-            title="保存失败记录",
+    def _export_failed_excel(self):
+        path = filedialog.asksaveasfilename(
+            title="导出失败记录 (Excel)",
             defaultextension=".xlsx",
-            filetypes=[("Excel文件", "*.xlsx")],
-            initialfile=f"failed_records_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+            filetypes=[("Excel 文件", "*.xlsx")],
+            initialfile=f"failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         )
-
-        if not file_path:
+        if not path:
             return
-
         try:
             wb = openpyxl.Workbook()
             ws = wb.active
-            ws.title = "发送失败记录"
-
-            headers = ['序号', '文件名', '学号', '姓名', '邮箱', '失败原因']
+            ws.title = "失败记录"
+            headers = ["序号", "文件名", "关键值", "姓名", "邮箱", "错误原因", "时间"]
             ws.append(headers)
-
-            for i, result in enumerate(failed_results, 1):
-                key = result.get('key', '')
-                recipient = result.get('recipient', {})
-                ws.append([
-                    i,
-                    result['file'],
-                    key,
-                    recipient.get('name', ''),
-                    recipient.get('email', ''),
-                    result.get('error', '')
-                ])
-
+            for idx, rec in enumerate(self.failed_records, 1):
+                ws.append([idx, rec.get("文件名", ""), rec.get("关键值", ""),
+                           rec.get("姓名", ""), rec.get("邮箱", ""),
+                           rec.get("错误", ""), rec.get("时间", "")])
             for col in range(1, len(headers) + 1):
                 ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 20
-
-            wb.save(file_path)
-            messagebox.showinfo("成功", f"失败记录已保存至:\n{file_path}")
-
+            wb.save(path)
+            messagebox.showinfo("成功", f"失败记录已导出至:\n{path}")
+            self.log_message(f"失败记录(Excel)已导出: {path}")
         except Exception as e:
-            messagebox.showerror("错误", f"导出失败: {str(e)}")
+            messagebox.showerror("错误", f"导出 Excel 失败: {e}")
 
+    def _export_failed_log(self):
+        path = filedialog.asksaveasfilename(
+            title="导出失败记录 (Log)",
+            defaultextension=".log",
+            filetypes=[("Log 文件", "*.log"), ("文本文件", "*.txt")],
+            initialfile=f"failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(f"{'='*70}\n")
+                f.write(f"  批量邮件发送 - 失败记录\n")
+                f.write(f"  导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"  总失败数: {len(self.failed_records)}\n")
+                f.write(f"{'='*70}\n\n")
+                for idx, rec in enumerate(self.failed_records, 1):
+                    f.write(f"--- 记录 {idx} ---\n")
+                    f.write(f"  文件名: {rec.get('文件名', '')}\n")
+                    f.write(f"  关键值: {rec.get('关键值', '')}\n")
+                    f.write(f"  姓  名: {rec.get('姓名', '')}\n")
+                    f.write(f"  邮  箱: {rec.get('邮箱', '')}\n")
+                    f.write(f"  错  误: {rec.get('错误', '')}\n")
+                    f.write(f"  时  间: {rec.get('时间', '')}\n\n")
+                f.write(f"{'='*70}\n")
+                f.write(f"  结束\n")
+                f.write(f"{'='*70}\n")
+            messagebox.showinfo("成功", f"失败记录已导出至:\n{path}")
+            self.log_message(f"失败记录(Log)已导出: {path}")
+        except Exception as e:
+            messagebox.showerror("错误", f"导出 Log 失败: {e}")
+
+    # ------------------------------------------------------- misc
     def on_closing(self):
-        if self.sending:
-            if messagebox.askyesno("确认", "正在发送中，确定要退出吗？"):
+        if self.is_sending:
+            if messagebox.askyesno("确认退出", "正在发送邮件，确定要退出吗？"):
                 self.stop_event.set()
+                self.pause_event.set()
                 self.root.after(500, self.root.destroy)
-        else:
-            self.root.destroy()
+            return
+        self.root.destroy()
 
     def run(self):
         self.root.mainloop()

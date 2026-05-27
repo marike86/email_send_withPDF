@@ -239,15 +239,15 @@ def extract_student_id(filename):
 
     【修改说明】
     如果您的文件名格式不同，请修改下面的正则表达式：
-    - r'签署后：(\d+)_'  : 匹配"签署后：学号_数字"格式
-    - r'(\d+)_'         : 匹配"学号_数字"格式
+    - r'签署后：(\\d+)_'  : 匹配"签署后：学号_数字"格式
+    - r'(\\d+)_'         : 匹配"学号_数字"格式
 
     正则表达式说明：
-    - (\d+)  : 捕获学号（连续数字）
+    - (\\d+)  : 捕获学号（连续数字）
     - _      : 下划线分隔符
 
     示例：如果您的文件是 "学号2023001.pdf" 格式，改为：
-    match = re.search(r'学号(\d+)', name_without_ext)
+    match = re.search(r'学号(\\d+)', name_without_ext)
     """
     name_without_ext = os.path.splitext(filename)[0]
     match = re.search(r'签署后：(\d+)_', name_without_ext)
