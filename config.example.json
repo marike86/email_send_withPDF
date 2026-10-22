@@ -1,0 +1,16 @@
+{
+  "smtp_server": "smtp.qq.com",
+  "smtp_port": 465,
+  "use_ssl": true,
+  "use_tls": false,
+  "sender_email": "your_email@example.com",
+  "student_info_excel": "student_info.xlsx",
+  "email_template": "examples/email_template.txt",
+  "attachment_folder": "pdfs",
+  "excel_student_id_col": 1,
+  "excel_name_col": 2,
+  "excel_email_col": 3,
+  "send_interval": 3,
+  "max_retries": 3,
+  "retry_interval": 10
+}
