@@ -6,14 +6,15 @@ from pathlib import Path
 import sys
 import threading
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import QEvent, QPointF, Qt, QThread, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
     QScrollArea, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
-    QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+    QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget, QStyle, QStyleOptionSpinBox,
+    QStyledItemDelegate,
 )
 
 import send_email as core
@@ -33,6 +34,25 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
     border-radius: 5px; padding: 7px 9px; min-height: 18px;
 }
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-bottom: 2px solid #0067c0; }
+QComboBox { padding-right: 36px; }
+QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover { border-color: #b2bac5; border-bottom-color: #677587; }
+QComboBox:focus, QComboBox:on { border-bottom: 2px solid #0067c0; }
+QComboBox::drop-down { subcontrol-origin: border; subcontrol-position: top right; width: 34px; border: none; background: transparent; }
+QComboBox::down-arrow { image: none; }
+QComboBox QAbstractItemView { background: white; border: 1px solid #d7dce2; border-radius: 6px; padding: 4px; outline: none; selection-background-color: #e6f2ff; selection-color: #005fb8; }
+QComboBox QAbstractItemView::item { min-height: 30px; padding: 3px 10px; border-radius: 4px; }
+QSpinBox, QDoubleSpinBox { padding-right: 36px; }
+QSpinBox QLineEdit, QDoubleSpinBox QLineEdit { border: none; border-radius: 0; background: transparent; padding: 0; min-height: 0; }
+QSpinBox::up-button, QDoubleSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 30px; height: 17px; border: none; background: transparent; margin: 1px 1px 0 0; }
+QSpinBox::down-button, QDoubleSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 30px; height: 17px; border: none; background: transparent; margin: 0 1px 1px 0; }
+QSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover { background: #edf3fa; border-radius: 4px; }
+QSpinBox::up-arrow, QSpinBox::down-arrow, QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow { image: none; }
+QFrame#pathField { background: white; border: 1px solid #d7dce2; border-bottom: 1px solid #87919e; border-radius: 5px; }
+QFrame#pathField:hover { border-color: #b2bac5; border-bottom-color: #677587; }
+QFrame#pathField[focused="true"] { border-bottom: 2px solid #0067c0; }
+QLineEdit#pathInput, QLineEdit#pathInput:focus { background: transparent; border: none; padding: 4px 9px; min-height: 0; }
+QPushButton#pathBrowse { background: #f8fafc; border: none; border-left: 1px solid #e4e7eb; border-radius: 3px; padding: 4px 12px; }
+QPushButton#pathBrowse:hover { background: #eaf2fb; }
 QPushButton { background: white; border: 1px solid #d7dce2; border-radius: 5px; padding: 8px 15px; }
 QPushButton:hover { background: #f0f6fc; border-color: #9bbddd; }
 QPushButton:pressed { background: #e2effb; }
@@ -54,6 +74,86 @@ QProgressBar::chunk { background: #0067c0; border-radius: 3px; }
 QScrollArea { border: none; background: transparent; }
 QSplitter::handle { background: #f7f8fa; width: 12px; }
 """
+
+
+def paint_chevron(painter, center, up=False, enabled=True):
+    """以矢量线条绘制清晰的箭头，不依赖系统字体或额外图片。"""
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor("#526174" if enabled else "#aab2bc"), 1.4,
+                        Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    direction = -1 if up else 1
+    x, y = center.x(), center.y()
+    painter.drawPolyline(QPolygonF([QPointF(x - 3.5, y - 1.5 * direction),
+                                   QPointF(x, y + 2 * direction),
+                                   QPointF(x + 3.5, y - 1.5 * direction)]))
+
+
+class FluentComboBox(QComboBox):
+    """统一下拉箭头与列表项间距，避免 Qt 原生子控件边线混入。"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setItemDelegate(QStyledItemDelegate(self))
+        self.setMinimumHeight(36)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        paint_chevron(painter, QPointF(self.width() - 18, self.height() / 2), enabled=self.isEnabled())
+        painter.end()
+
+
+class FluentSpinMixin:
+    """保留数值增减按钮行为，仅统一其箭头绘制。"""
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        option = QStyleOptionSpinBox()
+        self.initStyleOption(option)
+        painter = QPainter(self)
+        for control, up in ((QStyle.SubControl.SC_SpinBoxUp, True), (QStyle.SubControl.SC_SpinBoxDown, False)):
+            rect = self.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, option, control, self)
+            paint_chevron(painter, QPointF(rect.center()), up, self.isEnabled())
+        painter.end()
+
+
+class FluentSpinBox(FluentSpinMixin, QSpinBox):
+    """统一风格的整数输入框。"""
+
+
+class FluentDoubleSpinBox(FluentSpinMixin, QDoubleSpinBox):
+    """统一风格的小数输入框。"""
+
+
+class PathField(QFrame):
+    """一体式路径输入与浏览按钮，悬停显示完整路径。"""
+    def __init__(self, value, title, browse, parent=None):
+        super().__init__(parent)
+        self.setObjectName("pathField")
+        self.setFixedHeight(38)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(2, 2, 2, 2)
+        row.setSpacing(0)
+        self.edit = QLineEdit(value)
+        self.edit.setObjectName("pathInput")
+        self.edit.setPlaceholderText("请选择" + title)
+        self.edit.setToolTip(value)
+        self.edit.setCursorPosition(0)
+        self.edit.textChanged.connect(self.edit.setToolTip)
+        self.edit.editingFinished.connect(lambda: self.edit.setCursorPosition(0))
+        self.edit.installEventFilter(self)
+        row.addWidget(self.edit, 1)
+        self.browse_button = QPushButton("浏览…")
+        self.browse_button.setObjectName("pathBrowse")
+        self.browse_button.setToolTip("选择" + title)
+        self.browse_button.clicked.connect(browse)
+        row.addWidget(self.browse_button)
+        self.setFocusProxy(self.edit)
+
+    def eventFilter(self, watched, event):
+        if watched is self.edit and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+            self.setProperty("focused", event.type() == QEvent.Type.FocusIn)
+            self.style().unpolish(self)
+            self.style().polish(self)
+        return super().eventFilter(watched, event)
 
 
 def label(text, name=None):
@@ -157,13 +257,9 @@ class MainWindow(QMainWindow):
         text = label(title)
         text.setFixedWidth(68)
         row.addWidget(text)
-        edit = QLineEdit(str(self.config.get(key, "")))
-        edit.setPlaceholderText("请选择" + title)
-        self.fields[key] = edit
-        row.addWidget(edit, 1)
-        browse = QPushButton("浏览…")
-        browse.clicked.connect(lambda: self.browse(key, kind))
-        row.addWidget(browse)
+        field = PathField(str(self.config.get(key, "")), title, lambda: self.browse(key, kind))
+        self.fields[key] = field.edit
+        row.addWidget(field, 1)
         layout.addLayout(row)
 
     def build_workspace(self):
@@ -193,7 +289,7 @@ class MainWindow(QMainWindow):
         self.search.setMaximumWidth(240)
         self.search.textChanged.connect(self.filter_rows)
         toolbar.addWidget(self.search)
-        self.filter = QComboBox()
+        self.filter = FluentComboBox()
         self.filter.addItems(["全部状态", "待发送", "已发送", "需关注"])
         self.filter.currentIndexChanged.connect(self.filter_rows)
         toolbar.addWidget(self.filter)
@@ -285,17 +381,18 @@ class MainWindow(QMainWindow):
                     if kind == "column":
                         field.setText(core.openpyxl.utils.get_column_letter(core.column_number(value)))
                 elif kind == "security":
-                    field = QComboBox()
+                    field = FluentComboBox()
                     field.addItems(["STARTTLS · 通常使用 587", "SSL / TLS · 通常使用 465"])
                     field.setCurrentIndex(1 if self.config.get("use_ssl") or int(self.config["smtp_port"]) == 465 else 0)
                 elif kind == "seconds":
-                    field = QDoubleSpinBox()
+                    field = FluentDoubleSpinBox()
                     field.setRange(0, 86400)
                     field.setValue(float(value))
                 else:
-                    field = QSpinBox()
+                    field = FluentSpinBox()
                     field.setRange(1, 65535 if kind == "port" else 10)
                     field.setValue(int(value))
+                field.setFixedHeight(36)
                 self.fields[key] = field
                 form.addRow(caption, field)
             box.addLayout(form)
@@ -338,6 +435,7 @@ class MainWindow(QMainWindow):
             path, _ = QFileDialog.getOpenFileName(self, "选择文件", "", "Excel (*.xlsx)" if kind == "excel" else "文本模板 (*.txt)")
         if path:
             self.fields[key].setText(path)
+            self.fields[key].setCursorPosition(0)
 
     def save_settings(self):
         try:
