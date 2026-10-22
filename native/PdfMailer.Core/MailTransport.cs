@@ -35,17 +35,20 @@ public sealed class SmtpTransport(Func<ISmtpSession>? factory = null) : IMailTra
     {
         BatchPlanner.Validate(settings, true);
         if (!BatchPlanner.ValidEmail(job.Email)) throw new InvalidDataException("收件邮箱格式无效。");
-        var bytes = await File.ReadAllBytesAsync(job.Filepath).ConfigureAwait(false);
-        if (!bytes.AsSpan().StartsWith("%PDF-"u8)) throw new InvalidDataException("文件缺少 PDF 标识。");
-        if (Convert.ToHexStringLower(SHA256.HashData(bytes)) != job.Digest)
-            throw new InvalidDataException("附件在预检后发生变化，请重新检查文件。");
         using var message = new MimeMessage();
         message.From.Add(MailboxAddress.Parse(settings.SenderEmail));
         message.To.Add(MailboxAddress.Parse(job.Email));
         message.Subject = job.Subject;
         message.MessageId = MimeKit.Utils.MimeUtils.GenerateMessageId();
         var builder = new BodyBuilder { TextBody = job.Body };
-        builder.Attachments.Add(job.Filename, bytes, new ContentType("application", "pdf"));
+        foreach (var file in job.Files)
+        {
+            var bytes = await File.ReadAllBytesAsync(file.Filepath).ConfigureAwait(false);
+            if (!bytes.AsSpan().StartsWith("%PDF-"u8)) throw new InvalidDataException("文件缺少 PDF 标识。");
+            if (Convert.ToHexStringLower(SHA256.HashData(bytes)) != file.Digest)
+                throw new InvalidDataException("附件在预检后发生变化，请重新检查文件。");
+            builder.Attachments.Add(file.Filename, bytes, new ContentType("application", "pdf"));
+        }
         message.Body = builder.ToMessageBody();
         var session = factory?.Invoke() ?? new MailKitSession();
         try
@@ -69,6 +72,13 @@ public sealed class SmtpTransport(Func<ISmtpSession>? factory = null) : IMailTra
 public sealed class BatchSender(IMailTransport? transport = null)
 {
     private readonly IMailTransport transport = transport ?? new SmtpTransport();
+
+    private static void Record(SendJournal journal, MailJob job, string state, string error)
+    {
+        journal.Records[job.Key] = JobRecord.From(job) with { Status = state, Error = error };
+        foreach (var file in job.Attachments.Where(f => f.IdentityKey.Length > 0))
+            journal.Records[file.IdentityKey] = JobRecord.From(job) with { Filename = file.Filename, Status = state, Error = error };
+    }
 
     private static bool IsTransient(Exception exception) => exception switch
     {
@@ -102,9 +112,12 @@ public sealed class BatchSender(IMailTransport? transport = null)
             {
                 try
                 {
-                    if (BatchPlanner.HashFile(job.Filepath) != job.Digest)
+                    if (job.Attachments.Any(f => journal.Records.TryGetValue(f.IdentityKey, out var record)
+                        && record.Status is JobStates.Success or JobStates.Sending or JobStates.Uncertain))
+                        throw new InvalidOperationException("合并附件的发送记录已变化，请重新检查文件。");
+                    if (job.Files.Any(f => BatchPlanner.HashFile(f.Filepath) != f.Digest))
                         throw new InvalidDataException("附件在预检后发生变化，请重新检查文件。");
-                    journal.Records[job.Key] = JobRecord.From(job) with { Status = JobStates.Sending, Error = "" };
+                    Record(journal, job, JobStates.Sending, "");
                     // 持久化错误必须直接传播，不能吞掉后继续发送。
                     Storage.WriteAtomic(journalPath, journal);
                     for (var attempt = 0; attempt < settings.MaxRetries; attempt++)
@@ -130,7 +143,7 @@ public sealed class BatchSender(IMailTransport? transport = null)
                 }
                 catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException or InvalidDataException)
                 { error = exception.Message; }
-                journal.Records[job.Key] = JobRecord.From(job) with { Status = state, Error = error };
+                Record(journal, job, state, error);
                 Storage.WriteAtomic(journalPath, journal);
             }
             var update = new JobUpdate(job.Key, state, error, updates.Count + 1, queue.Length);

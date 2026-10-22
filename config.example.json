@@ -11,6 +11,8 @@
   "excel_student_id_col": 1,
   "excel_name_col": 2,
   "excel_email_col": 3,
+  "excel_worksheet": "",
+  "group_attachments": false,
   "send_interval": 3,
   "max_retries": 3,
   "retry_interval": 10

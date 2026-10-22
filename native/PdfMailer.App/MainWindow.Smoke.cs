@@ -44,6 +44,7 @@ public partial class MainWindow
             checks["long_mail_vertical_offset"] = PreviewScroll.VerticalOffset;
             if (PreviewScroll.VerticalOffset <= 0) throw new InvalidOperationException("原生阅读滚动未生效。");
             await CaptureAsync(output, "winui3-long-preview.png");
+            await VerifyFeaturesAsync(output, checks);
             LoadDemo();
             Root.RequestedTheme = ElementTheme.Dark;
             await Task.Delay(250);
@@ -58,15 +59,17 @@ public partial class MainWindow
         { checks["success"] = false; checks["error"] = exception.ToString(); }
         finally
         {
+            checks["busy_at_close"] = ViewModel.IsBusy;
+            checks["dialog_at_close"] = showingDialog;
             await File.WriteAllTextAsync(Path.Combine(output, "smoke-report.json"), JsonSerializer.Serialize(checks, Storage.Json));
             Close();
         }
     }
 
-    private async Task CaptureAsync(string folder, string name)
+    private async Task CaptureAsync(string folder, string name, UIElement? element = null)
     {
         var bitmap = new RenderTargetBitmap();
-        await bitmap.RenderAsync(Root);
+        await bitmap.RenderAsync(element ?? Root);
         var pixels = await bitmap.GetPixelsAsync();
         using var stream = new InMemoryRandomAccessStream();
         var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, stream);

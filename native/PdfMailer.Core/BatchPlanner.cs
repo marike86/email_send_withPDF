@@ -65,7 +65,9 @@ public static partial class BatchPlanner
     public static Dictionary<string, Student> LoadStudents(MailSettings settings)
     {
         using var workbook = new XLWorkbook(settings.StudentInfoExcel);
-        var sheet = workbook.Worksheets.FirstOrDefault(w => w.TabActive) ?? workbook.Worksheet(1);
+        var sheet = settings.ExcelWorksheet.Length > 0 ? workbook.Worksheets.FirstOrDefault(w => w.Name == settings.ExcelWorksheet)
+            ?? throw new InvalidDataException("所选工作表已不存在，请重新导入。")
+            : workbook.Worksheets.FirstOrDefault(w => w.TabActive) ?? workbook.Worksheet(1);
         var lastColumn = sheet.LastColumnUsed()?.ColumnNumber() ?? 0;
         if (new[] { settings.ExcelStudentIdCol, settings.ExcelNameCol, settings.ExcelEmailCol }.Max() > lastColumn)
             throw new InvalidDataException("配置的列超出 Excel 的实际列数。");
@@ -184,6 +186,36 @@ public static partial class BatchPlanner
             { job.Status = JobStates.Blocked; job.Error = exception.Message; }
             jobs.Add(job);
         }
-        return jobs;
+        return settings.GroupAttachments ? MergeAttachments(jobs, settings, journal) : jobs;
+    }
+
+    private static IReadOnlyList<MailJob> MergeAttachments(List<MailJob> jobs, MailSettings settings, SendJournal journal)
+    {
+        var result = new List<MailJob>(jobs.Where(j => j.Status == JobStates.Blocked));
+        foreach (var group in jobs.Where(j => j.Status != JobStates.Blocked).GroupBy(j => (j.StudentId, j.Email)))
+        {
+            var items = group.ToArray();
+            if (items.Length == 1) { result.Add(items[0]); continue; }
+            var first = items[0];
+            var files = items.SelectMany(j => j.Files.Select(f => f with { IdentityKey = j.Key })).ToArray();
+            var key = Identity(["bundle-v1", settings.SenderEmail.Trim().ToLowerInvariant(), first.Email, first.Subject, first.Body,
+                .. files.SelectMany(f => new[] { f.Filepath, f.Digest })]);
+            var merged = new MailJob { Filename = string.Join("、", files.Select(f => f.Filename)), Filepath = first.Filepath,
+                StudentId = first.StudentId, Name = first.Name, Email = first.Email, Subject = first.Subject, Body = first.Body,
+                Key = key, Attachments = files };
+            if (journal.Records.TryGetValue(key, out var previous))
+            {
+                merged.Status = previous.Status == JobStates.Sending ? JobStates.Uncertain : previous.Status;
+                merged.Error = previous.Error;
+            }
+            else if (items.All(j => j.Status == JobStates.Success)) merged.Status = JobStates.Success;
+            else if (items.Any(j => j.Status is JobStates.Success or JobStates.Uncertain or JobStates.Sending))
+            {
+                merged.Status = JobStates.Blocked;
+                merged.Error = "这组附件已有部分发送或待核实记录。请关闭合并模式，核对并处理剩余附件，避免重复发送。";
+            }
+            result.Add(merged);
+        }
+        return result.OrderBy(j => j.Filename, StringComparer.Ordinal).ToArray();
     }
 }

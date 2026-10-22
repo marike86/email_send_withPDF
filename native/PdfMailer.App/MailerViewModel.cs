@@ -12,6 +12,19 @@ public sealed partial class MailerViewModel : ObservableObject
     private CancellationTokenSource? stop;
     private string search = "";
     private int filter;
+    public SendScope Scope { get; private set; } = SendScope.Included;
+    [ObservableProperty] public partial int SelectedCount { get; set; }
+    public IReadOnlyList<MailJob> SendQueue(bool retryOnly = false) => SendSelection.Select(Jobs, VisibleJobs, Scope, retryOnly);
+    public void SetScope(int index) { Scope = (SendScope)index; UpdateActions(); }
+    public void IncludeVisible(bool included) { foreach (var job in VisibleJobs) job.IsIncluded = included && job.IncludeAllowed; UpdateActions(); }
+    private void ObserveJobs()
+    {
+        foreach (var job in Jobs)
+        {
+            job.IsIncluded = job.IncludeAllowed;
+            job.PropertyChanged += (_, args) => { if (args.PropertyName == nameof(MailJob.IsIncluded)) UpdateActions(); };
+        }
+    }
     [ObservableProperty] public partial bool IsBusy { get; set; }
     [ObservableProperty] public partial bool CanSend { get; set; }
     [ObservableProperty] public partial bool CanRetry { get; set; }
@@ -44,8 +57,9 @@ public sealed partial class MailerViewModel : ObservableObject
 
     private void UpdateActions()
     {
-        CanSend = !IsBusy && Snapshot is not null && Jobs.Any(j => JobStates.CanSend(j.Status));
-        CanRetry = !IsBusy && Snapshot is not null && Jobs.Any(j => j.Status == JobStates.Failed);
+        SelectedCount = SendQueue().Count;
+        CanSend = !IsBusy && Snapshot is not null && SelectedCount > 0;
+        CanRetry = !IsBusy && Snapshot is not null && SendQueue(true).Count > 0;
         CanExport = !IsBusy && Jobs.Count > 0;
         CanResolve = !IsBusy && Snapshot is not null && SelectedJob?.Status is JobStates.Sending or JobStates.Uncertain;
     }
@@ -72,6 +86,7 @@ public sealed partial class MailerViewModel : ObservableObject
             if (match && state) VisibleJobs.Add(job);
         }
         SelectedJob = selected is not null && VisibleJobs.Contains(selected) ? selected : VisibleJobs.FirstOrDefault();
+        UpdateActions();
     }
 
     public async Task CheckAsync(MailSettings settings, string statePath)
@@ -83,6 +98,7 @@ public sealed partial class MailerViewModel : ObservableObject
         try
         {
             Jobs = await Task.Run(() => BatchPlanner.Prepare(settings, statePath));
+            ObserveJobs();
             Snapshot = settings with { };
             Filter(search, filter); RefreshCounts();
             Notice = TotalCount == 0 ? "该目录未找到 PDF 文件。" : $"检查完成：{TotalCount} 个 PDF，{AttentionCount} 项需关注。选择一行预览邮件。";
@@ -91,11 +107,11 @@ public sealed partial class MailerViewModel : ObservableObject
         finally { IsChecking = false; IsBusy = false; }
     }
 
-    public async Task SendAsync(string statePath, bool retryOnly)
+    public async Task SendAsync(string statePath, bool retryOnly, IReadOnlyList<MailJob>? confirmed = null)
     {
         if (IsBusy || Snapshot is null) return;
         var settings = Snapshot with { };
-        var jobs = Jobs.ToArray();
+        var jobs = (confirmed ?? SendQueue(retryOnly)).ToArray();
         stop = new CancellationTokenSource();
         IsBusy = true; Progress = 0;
         Notice = "正在发送，可停止后续邮件；当前网络请求完成后停止。";
@@ -117,6 +133,7 @@ public sealed partial class MailerViewModel : ObservableObject
         var job = Jobs.FirstOrDefault(j => j.Key == update.Key);
         if (job is null) return;
         job.Status = update.Status; job.Error = update.Error;
+        if (!job.IncludeAllowed) job.IsIncluded = false;
         Progress = update.Total == 0 ? 0 : 100d * update.Completed / update.Total;
         Notice = $"{update.Completed} / {update.Total} · {job.StatusLabel} · {job.Filename}";
         RefreshCounts();
@@ -131,7 +148,7 @@ public sealed partial class MailerViewModel : ObservableObject
     public void Resolve(string statePath, bool delivered)
     {
         if (SelectedJob is not { } job || !CanResolve) return;
-        Storage.ResolveUncertain(statePath, job.Key, delivered);
+        Storage.ResolveUncertain(statePath, job.Key, delivered, job.Attachments.Select(f => f.IdentityKey));
         job.Status = delivered ? JobStates.Success : JobStates.Failed;
         job.Error = "用户已核实发送结果";
         RefreshCounts();
@@ -139,7 +156,7 @@ public sealed partial class MailerViewModel : ObservableObject
 
     public void LoadDemo(IReadOnlyList<MailJob> jobs, MailSettings? settings = null)
     {
-        Jobs = jobs; Snapshot = settings ?? new(); Filter("", 0); RefreshCounts();
+        Jobs = jobs; ObserveJobs(); Snapshot = settings ?? new(); Filter("", 0); RefreshCounts();
         Notice = "演示数据 · 不会连接 SMTP 或发送邮件。";
     }
 }

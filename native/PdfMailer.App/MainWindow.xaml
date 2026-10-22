@@ -30,7 +30,11 @@
                     </StackPanel>
                     <ContentControl Grid.Row="1" IsEnabled="{Binding CanEdit}" HorizontalContentAlignment="Stretch"><Border Style="{StaticResource CardStyle}">
                         <StackPanel Spacing="12">
-                            <TextBlock Text="准备文件" Style="{StaticResource SubtitleTextBlockStyle}" />
+                            <Grid><TextBlock Text="准备文件" Style="{StaticResource SubtitleTextBlockStyle}" />
+<StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+<Button Content="导入向导" Click="OpenExcelWizard" /><Button Content="模板库" Click="OpenTemplates" />
+<Button Content="任务历史" Click="OpenTasks" /><Button Content="保存任务" Click="SaveTaskClicked" />
+</StackPanel></Grid>
                             <Grid ColumnSpacing="16">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                 <Grid>
@@ -52,11 +56,15 @@
                                         Click="PickTemplate" AutomationProperties.Name="浏览邮件模板" ToolTipService.ToolTip="选择模板"><FontIcon Glyph="&#xE8A5;" FontSize="16" /></Button>
                                 </Grid>
                             </Grid>
+<StackPanel Orientation="Horizontal" Spacing="12">
+<CheckBox x:Name="GroupInput" Content="同一学号的 PDF 合并为一封邮件" Checked="GroupChanged" Unchecked="GroupChanged" />
+<TextBlock x:Name="WorksheetLabel" Text="工作表：自动选择" VerticalAlignment="Center" Style="{StaticResource MutedTextStyle}" />
+</StackPanel>
                         </StackPanel>
                     </Border></ContentControl>
                     <Grid x:Name="MetricsPanel" Grid.Row="2" ColumnSpacing="12" Margin="0,16">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                        <Border Style="{StaticResource CardStyle}" Padding="18,12"><StackPanel Spacing="3"><TextBlock Text="{Binding TotalCount}" Style="{StaticResource TitleTextBlockStyle}" /><TextBlock Text="附件总数" Style="{StaticResource MutedTextStyle}" /></StackPanel></Border>
+                        <Border Style="{StaticResource CardStyle}" Padding="18,12"><StackPanel Spacing="3"><TextBlock Text="{Binding TotalCount}" Style="{StaticResource TitleTextBlockStyle}" /><TextBlock Text="邮件总数" Style="{StaticResource MutedTextStyle}" /></StackPanel></Border>
                         <Border Grid.Column="1" Style="{StaticResource CardStyle}" Padding="18,12"><StackPanel Spacing="3"><TextBlock Text="{Binding PendingCount}" Style="{StaticResource TitleTextBlockStyle}" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" /><TextBlock Text="待发送（含失败）" Style="{StaticResource MutedTextStyle}" /></StackPanel></Border>
                         <Border Grid.Column="2" Style="{StaticResource CardStyle}" Padding="18,12"><StackPanel Spacing="3"><TextBlock Text="{Binding SuccessCount}" Style="{StaticResource TitleTextBlockStyle}" /><TextBlock Text="已发送" Style="{StaticResource MutedTextStyle}" /></StackPanel></Border>
                         <Border Grid.Column="3" Style="{StaticResource CardStyle}" Padding="18,12"><StackPanel Spacing="3"><TextBlock Text="{Binding AttentionCount}" Style="{StaticResource TitleTextBlockStyle}" /><TextBlock Text="需关注" Style="{StaticResource MutedTextStyle}" /></StackPanel></Border>
@@ -73,18 +81,26 @@
                         <Grid.ColumnDefinitions><ColumnDefinition Width="1.6*" MinWidth="380" /><ColumnDefinition Width="*" MinWidth="320" /></Grid.ColumnDefinitions>
                         <Border Style="{StaticResource CardStyle}" Padding="0">
                             <Grid>
-                                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
-                                <Grid Padding="20,12" ColumnSpacing="12" Background="{ThemeResource SubtleFillColorSecondaryBrush}">
+                                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+<StackPanel Orientation="Horizontal" Spacing="8" Padding="12,8">
+<ComboBox x:Name="ScopeInput" SelectedIndex="1" SelectionChanged="ScopeChanged" AutomationProperties.Name="发送范围">
+<ComboBoxItem Content="整份计划" /><ComboBoxItem Content="仅勾选项" /><ComboBoxItem Content="当前筛选结果" />
+</ComboBox><Button Content="勾选筛选结果" Click="IncludeVisible" IsEnabled="{Binding CanEdit}" /><Button Content="清除勾选" Click="ExcludeVisible" IsEnabled="{Binding CanEdit}" />
+<StackPanel Orientation="Horizontal" Spacing="3" VerticalAlignment="Center"><TextBlock Text="本次" /><TextBlock Text="{Binding SelectedCount}" /><TextBlock Text="封" /></StackPanel>
+</StackPanel>
+                                <Grid Grid.Row="1" Padding="20,12" ColumnSpacing="12" Background="{ThemeResource SubtleFillColorSecondaryBrush}">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="1.5*" /><ColumnDefinition Width="0.6*" /><ColumnDefinition Width="1.6*" /><ColumnDefinition Width="66" /></Grid.ColumnDefinitions>
                                     <TextBlock Text="PDF 文件" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Grid.Column="1" Text="姓名" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Grid.Column="2" Text="收件邮箱" Style="{StaticResource CaptionTextBlockStyle}" /><TextBlock Grid.Column="3" Text="状态" Style="{StaticResource CaptionTextBlockStyle}" />
                                 </Grid>
-                                <ListView x:Name="JobsList" Grid.Row="1" ItemsSource="{Binding VisibleJobs}" SelectedItem="{Binding SelectedJob, Mode=TwoWay}" SelectionMode="Single"
+                                <ListView x:Name="JobsList" Grid.Row="2" ItemsSource="{Binding VisibleJobs}" SelectedItem="{Binding SelectedJob, Mode=TwoWay}" SelectionMode="Single" IsEnabled="{Binding CanEdit}"
                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                     <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch" /><Setter Property="Padding" Value="16,10" /></Style></ListView.ItemContainerStyle>
                                     <ListView.ItemTemplate><DataTemplate x:DataType="core:MailJob">
                                         <Grid ColumnSpacing="12" ToolTipService.ToolTip="{Binding Error}">
                                             <Grid.ColumnDefinitions><ColumnDefinition Width="1.5*" /><ColumnDefinition Width="0.6*" /><ColumnDefinition Width="1.6*" /><ColumnDefinition Width="66" /></Grid.ColumnDefinitions>
-                                            <TextBlock Text="{Binding Filename}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTipService.ToolTip="{Binding Filename}" />
+                                            <Grid ColumnSpacing="6"><Grid.ColumnDefinitions><ColumnDefinition Width="32" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+<CheckBox IsChecked="{Binding IsIncluded, Mode=TwoWay}" IsEnabled="{Binding IncludeAllowed}" MinWidth="0" AutomationProperties.Name="勾选此邮件" />
+<TextBlock Grid.Column="1" Text="{Binding Filename}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTipService.ToolTip="{Binding Filename}" /></Grid>
                                             <TextBlock Grid.Column="1" Text="{Binding Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
                                             <TextBlock Grid.Column="2" Text="{Binding Email}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTipService.ToolTip="{Binding Email}" />
                                             <TextBlock Grid.Column="3" Text="{Binding StatusLabel}" VerticalAlignment="Center" />
@@ -96,7 +112,8 @@
                         <Border Grid.Column="1" Style="{StaticResource CardStyle}" Padding="16">
                             <Grid RowSpacing="8">
                                 <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-                                <TextBlock Text="邮件预览" Style="{StaticResource BodyStrongTextBlockStyle}" FontSize="18" />
+                                <Grid><TextBlock Text="邮件预览" Style="{StaticResource BodyStrongTextBlockStyle}" FontSize="18" />
+<StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6"><Button Content="PDF" Click="OpenPdfPreview" /><Button Content="试发" ToolTipService.ToolTip="发送到自己的邮箱" Click="SendTestClicked" IsEnabled="{Binding CanEdit}" /></StackPanel></Grid>
                                 <StackPanel Grid.Row="1" Spacing="4">
                                     <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="40" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                         <TextBlock Text="收件人" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
@@ -134,11 +151,13 @@
                 </Grid>
                 <Grid x:Name="SettingsPanel" Visibility="Collapsed" RowSpacing="16">
                     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-                    <StackPanel Spacing="6"><TextBlock Text="账户与设置" Style="{StaticResource TitleTextBlockStyle}" /><TextBlock Text="授权码仅保留在本次会话，保存设置不会写入授权码。" Style="{StaticResource MutedTextStyle}" /></StackPanel>
+                    <StackPanel Spacing="6"><TextBlock Text="账户与设置" Style="{StaticResource TitleTextBlockStyle}" /><TextBlock Text="授权码可由 Windows 安全保存，配置与任务文件不包含授权码。" Style="{StaticResource MutedTextStyle}" /></StackPanel>
                     <ScrollViewer Grid.Row="1" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
                         <ContentControl IsEnabled="{Binding CanEdit}" HorizontalContentAlignment="Stretch"><StackPanel x:Name="SettingsForm" Spacing="16" Margin="0,0,16,0" MaxWidth="1000" HorizontalAlignment="Left">
                             <Border Style="{StaticResource CardStyle}"><StackPanel Spacing="16">
                                 <TextBlock Text="发件账户" Style="{StaticResource SubtitleTextBlockStyle}" />
+<StackPanel Orientation="Horizontal" Spacing="8"><Button Content="切换账户" Click="OpenAccounts" /><Button Content="保存账户" Click="SaveAccountClicked" />
+<CheckBox x:Name="RememberInput" Content="安全记住授权码" Checked="RememberChanged" Unchecked="RememberChanged" /><Button Content="检测连接" Click="CheckConnection" /><Button Content="验证登录" Click="CheckAuthentication" /></StackPanel>
                                 <Grid ColumnSpacing="20"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                     <TextBox x:Name="SenderInput" Header="发件邮箱" PlaceholderText="your_email@example.com" TextChanged="SettingsTextChanged" MinWidth="300" />
                                     <PasswordBox x:Name="PasswordInput" Grid.Column="1" Header="邮箱授权码" PasswordRevealMode="Peek" PasswordChanged="SettingsPasswordChanged" MinWidth="300" />

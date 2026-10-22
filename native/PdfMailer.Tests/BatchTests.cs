@@ -230,6 +230,139 @@ public sealed class BatchTests : IDisposable
         Assert.Throws<InvalidDataException>(() => BatchPlanner.Validate(settings with { MaxRetries = 0 }));
     }
 
+
+    [Fact] public void ImportDetectsHeadersAndPreservesLeadingZeros()
+    {
+        var sheet = Assert.Single(ExcelImport.Inspect(settings.StudentInfoExcel));
+        Assert.Equal("学生", sheet.Name); Assert.Equal(1, sheet.IdColumn); Assert.Equal(2, sheet.NameColumn); Assert.Equal(3, sheet.EmailColumn);
+        Assert.Equal("001", Assert.Single(sheet.Rows)[0]);
+    }
+    [Fact] public void SelectedWorksheetOverridesActiveSheet()
+    {
+        using (var book = new XLWorkbook(settings.StudentInfoExcel))
+        {
+            var other = book.AddWorksheet("另一个班"); other.Cell(1, 1).Value = "学号"; other.Cell(1, 2).Value = "姓名"; other.Cell(1, 3).Value = "邮箱";
+            other.Cell(2, 1).Value = "001"; other.Cell(2, 2).Value = "李四"; other.Cell(2, 3).Value = "other@example.com"; book.Save();
+        }
+        Assert.Equal("李四", Assert.Single(BatchPlanner.Prepare(settings with { ExcelWorksheet = "另一个班" }, state)).Name);
+        Assert.Throws<InvalidDataException>(() => BatchPlanner.Prepare(settings with { ExcelWorksheet = "被删除" }, state));
+    }
+    [Fact] public void SendScopesHaveExplicitMembership()
+    {
+        var a = new MailJob { Key = "a", IsIncluded = false }; var b = new MailJob { Key = "b" };
+        var c = new MailJob { Key = "c", Status = JobStates.Success }; var d = new MailJob { Key = "d", Status = JobStates.Failed };
+        var all = new[] { a, b, c, d };
+        Assert.Equal(new[] { a, b, d }, SendSelection.Select(all, [a], SendScope.All));
+        Assert.Equal(new[] { b, d }, SendSelection.Select(all, [a], SendScope.Included));
+        Assert.Equal(new[] { a }, SendSelection.Select(all, [a], SendScope.Visible));
+        Assert.Equal(new[] { d }, SendSelection.Select(all, [a, d], SendScope.Visible, true));
+        Assert.Empty(SendSelection.Select(all, [], SendScope.Visible));
+    }
+    private IReadOnlyList<MailJob> PrepareGrouped()
+    {
+        File.WriteAllBytes(Path.Combine(settings.AttachmentFolder, "001_成绩单.pdf"), "%PDF-1.4\nsecond"u8.ToArray());
+        return BatchPlanner.Prepare(settings with { GroupAttachments = true }, state);
+    }
+    [Fact] public async Task GroupedSuccessIsAlsoSkippedInSingleMode()
+    {
+        var grouped = PrepareGrouped(); var job = Assert.Single(grouped); Assert.Equal(2, job.AttachmentCount);
+        var transport = new FakeTransport(); await new BatchSender(transport).RunAsync(settings, grouped, state);
+        Assert.Equal(1, transport.Calls); Assert.All(Prepare(), j => Assert.Equal(JobStates.Success, j.Status));
+        Assert.Equal(JobStates.Success, Assert.Single(BatchPlanner.Prepare(settings with { GroupAttachments = true }, state)).Status);
+    }
+    [Fact] public async Task PartialSingleSuccessBlocksGrouping()
+    {
+        var single = Assert.Single(Prepare()); await new BatchSender(new FakeTransport()).RunAsync(settings, [single], state);
+        var group = Assert.Single(PrepareGrouped()); Assert.Equal(JobStates.Blocked, group.Status); Assert.Contains("部分", group.Error);
+    }
+    [Fact] public async Task AllSingleSuccessIsSkippedWhenGrouping()
+    {
+        PrepareGrouped(); await new BatchSender(new FakeTransport()).RunAsync(settings, Prepare(), state);
+        Assert.Equal(JobStates.Success, Assert.Single(PrepareGrouped()).Status);
+    }
+    [Fact] public async Task GroupedUncertainCanResolveAllConstituents()
+    {
+        var grouped = PrepareGrouped(); var job = Assert.Single(grouped);
+        await new BatchSender(new FakeTransport { NextError = new DeliveryUncertainException("lost") }).RunAsync(settings, grouped, state);
+        Assert.All(Prepare(), j => Assert.Equal(JobStates.Uncertain, j.Status));
+        Storage.ResolveUncertain(state, job.Key, true, job.Attachments.Select(f => f.IdentityKey));
+        Assert.All(Prepare(), j => Assert.Equal(JobStates.Success, j.Status));
+    }
+    [Fact] public async Task ChangedSecondAttachmentBlocksEntireBundle()
+    {
+        var grouped = PrepareGrouped(); File.AppendAllText(grouped[0].Files[1].Filepath, "changed");
+        var fake = new FakeTransport(); var updates = await new BatchSender(fake).RunAsync(settings, grouped, state);
+        Assert.Equal(0, fake.Calls); Assert.Equal(JobStates.Failed, Assert.Single(updates).Status);
+    }
+    [Fact] public async Task StaleGroupCannotOverwriteSuccessfulConstituent()
+    {
+        var grouped = PrepareGrouped(); var singles = Prepare();
+        await new BatchSender(new FakeTransport()).RunAsync(settings, [singles[0]], state);
+        var fake = new FakeTransport();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new BatchSender(fake).RunAsync(settings, grouped, state));
+        Assert.Equal(0, fake.Calls); Assert.Equal(JobStates.Success, Prepare()[0].Status);
+    }
+    [Fact] public async Task ChangedStaleBundleCannotEraseSuccess()
+    {
+        var grouped = PrepareGrouped(); var singles = Prepare();
+        await new BatchSender(new FakeTransport()).RunAsync(settings, [singles[0]], state);
+        File.AppendAllText(grouped[0].Files[1].Filepath, "changed");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new BatchSender(new FakeTransport()).RunAsync(settings, grouped, state));
+        Assert.Equal(JobStates.Success, Prepare()[0].Status);
+    }
+    [Fact] public async Task DiagnosticsCleanupDoesNotHideSuccess()
+    {
+        await new AccountDiagnostics(() => new FakeSession { CleanupError = true }).CheckAsync(settings, true);
+    }
+    [Fact] public async Task GroupedTransportBuildsAllAttachments()
+    {
+        var session = new MultiSession(); await new SmtpTransport(() => session).SendAsync(settings, Assert.Single(PrepareGrouped()));
+        Assert.Equal(2, session.Files.Count); Assert.Contains("001_证书.PDF", session.Files); Assert.Contains("001_成绩单.pdf", session.Files);
+    }
+    [Fact] public async Task DiagnosticsAuthenticateWithoutSending()
+    {
+        var session = new MultiSession(); await new AccountDiagnostics(() => session).CheckAsync(settings, false);
+        Assert.True(session.Connected); Assert.False(session.Authenticated); Assert.Empty(session.Files);
+        await new AccountDiagnostics(() => session).CheckAsync(settings, true);
+        Assert.True(session.Authenticated); Assert.Empty(session.Files);
+    }
+    [Fact] public async Task TestMailUsesOwnAddressAndSeparateJournal()
+    {
+        var original = Assert.Single(PrepareGrouped()); var test = AccountDiagnostics.CreateTest(original, settings.SenderEmail);
+        Assert.Equal(settings.SenderEmail, test.Email); Assert.Equal(original.Body, test.Body); Assert.StartsWith("[试发]", test.Subject);
+        Assert.Equal(original.AttachmentCount, test.AttachmentCount); Assert.All(test.Attachments, f => Assert.Empty(f.IdentityKey));
+        await new BatchSender(new FakeTransport()).RunAsync(settings, [test], Path.Combine(root, "test-status.json"));
+        Assert.False(File.Exists(state)); Assert.Equal(JobStates.Ready, Assert.Single(PrepareGrouped()).Status);
+    }
+    [Fact] public void HistoryAndAccountsNeverPersistPasswords()
+    {
+        var store = new WorkspaceStore(root);
+        store.SaveTask(new("task", "测试任务", DateTimeOffset.Now, settings, 1, 0, 0));
+        store.SaveAccount(new(settings.SenderEmail, settings.SmtpServer, settings.SmtpPort, settings.UseSsl, true));
+        Assert.DoesNotContain("secret", File.ReadAllText(Path.Combine(root, "tasks.json")));
+        Assert.DoesNotContain("sender_password", File.ReadAllText(Path.Combine(root, "tasks.json")));
+        Assert.Empty(Assert.Single(store.Tasks).Settings.SenderPassword); Assert.Equal(settings.StateFile, store.Tasks[0].Settings.StateFile);
+        store.SaveTask(store.Tasks[0] with { Success = 1 }); Assert.Single(store.Tasks); Assert.Equal(1, store.Tasks[0].Success);
+        store.DeleteAccount(settings.SenderEmail); Assert.Empty(store.Accounts);
+    }
+    [Fact] public void TemplatesRoundTripAndRejectMultilineSubjects()
+    {
+        var store = new WorkspaceStore(root); var template = new SavedTemplate("id", "成绩单", "{姓名}的资料", "{学号}同学，你好。");
+        store.SaveTemplate(template); var materialized = store.Materialize(Assert.Single(store.Templates));
+        Assert.Equal(new MailTemplate(template.Subject, template.Body), BatchPlanner.LoadTemplate(materialized));
+        store.SaveTemplate(template with { Name = "修改名称" }); Assert.Single(store.Templates);
+        Assert.Throws<InvalidDataException>(() => store.SaveTemplate(template with { Subject = "a\nb" }));
+    }
+    private sealed class MultiSession : ISmtpSession
+    {
+        public bool Connected, Authenticated; public List<string> Files = [];
+        public Task ConnectAsync(string host, int port, SecureSocketOptions security) { Connected = true; return Task.CompletedTask; }
+        public Task AuthenticateAsync(string user, string password) { Authenticated = true; return Task.CompletedTask; }
+        public Task SendAsync(MimeMessage message) { Files = message.Attachments.Cast<MimePart>().Select(p => p.FileName ?? "").ToList(); return Task.CompletedTask; }
+        public Task DisconnectAsync() => Task.CompletedTask;
+        public void Dispose() { }
+    }
+
     private sealed class FakeTransport : IMailTransport
     {
         public int Calls; public Exception? NextError; public Action? OnSend;
