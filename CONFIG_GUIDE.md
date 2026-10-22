@@ -8,22 +8,26 @@
 | smtp_port | 1–65535；465 自动使用隐式 SSL |
 | use_ssl / use_tls | 隐式 SSL / STARTTLS，SSL 优先，发送必须加密 |
 | sender_email | 单个发件邮箱 |
-| student_info_excel | `.xlsx` 学生表，首行为表头，读取活动工作表 |
+| student_info_excel | `.xlsx` 学生表，首行为表头，工作表可通过导入向导选择 |
 | email_template | UTF-8 模板，第一行为主题，其余为正文 |
 | attachment_folder | PDF 附件目录 |
 | state_file | 原生桌面版发送日志；CLI 请显式使用 --state |
 | excel_student_id_col | 学号列，默认 1（A） |
 | excel_name_col | 姓名列，默认 2（B） |
 | excel_email_col | 邮箱列，默认 3（C） |
+| excel_worksheet | 原生桌面版工作表名称，空值使用活动工作表 |
+| group_attachments | 原生桌面版按学号合并附件，默认 false |
 | send_interval | 每封邮件间隔秒数，默认 3 |
 | max_retries | 含首次在内的最多尝试次数，1–10，默认 3 |
 | retry_interval | 临时故障重试间隔，默认 10 秒 |
 
 间隔允许小数，原生版取 0–86400 秒。列号支持整数和 A、AA 等字母，三列必须不同。学号必须唯一；前导零应实际存为文本，仅设置 Excel 显示格式无法恢复。
 
+新增的工作表与多附件选项仅用于原生桌面版；Python CLI 保留原行为。
+
 配置中的相对路径以配置文件目录为基准。导入后会转换为完整路径。环境变量使用对应大写名，如 `SMTP_SERVER`、`SMTP_PORT`、`USE_SSL`、`SENDER_EMAIL`、`SENDER_PASSWORD`；布尔值为 true/false 或 1/0。环境变量在加载配置时覆盖文件内容。
 
-授权码在界面 PasswordBox 中输入，仅本次使用。配置保存始终排除 `sender_password`。可读取旧配置中的密码兼容迁移，保存后移除。
+授权码在界面中输入，默认仅本次使用。主动勾选“安全记住授权码”并保存账户或设置后，由 Windows 凭据保管库保存。取消勾选后保存或删除账户，会移除保存的凭据。配置保存始终排除 `sender_password`。可读取旧配置中的密码兼容迁移，保存后移除。
 
 ## 模板
 

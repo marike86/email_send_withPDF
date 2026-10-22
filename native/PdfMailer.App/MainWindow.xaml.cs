@@ -72,6 +72,10 @@ public partial class MainWindow : Window
         Root.Loaded -= RootLoaded;
         if (Navigation.SettingsItem is NavigationViewItem settingsItem) settingsItem.Content = "账户与设置";
         if (IsDemo) LoadDemo();
+        else if (startupError is null)
+        {
+            try { RestoreRememberedPassword(); } catch (Exception exception) { await ShowError(exception.Message); }
+        }
         if (startupError is not null && !IsDemo) await ShowError(startupError);
         if (GetArgument("--smoke-test") is { } output)
             await RunSmokeAsync(output);
@@ -85,6 +89,7 @@ public partial class MainWindow : Window
         TemplateInput.Text = value.EmailTemplate;
         SenderInput.Text = value.SenderEmail;
         PasswordInput.Password = value.SenderPassword;
+        RememberInput.IsChecked = false;
         ServerInput.Text = value.SmtpServer;
         PortInput.Value = value.SmtpPort;
         SecurityInput.SelectedIndex = value.UseSsl || value.SmtpPort == 465 ? 0 : 1;
@@ -95,6 +100,8 @@ public partial class MainWindow : Window
         RetriesInput.Value = value.MaxRetries;
         RetryIntervalInput.Value = value.RetryInterval;
         JournalInput.Text = journal;
+        GroupInput.IsChecked = value.GroupAttachments;
+        WorksheetLabel.Text = "工作表：" + (value.ExcelWorksheet.Length > 0 ? value.ExcelWorksheet : "自动选择");
         ConfigLocation.Text = "配置文件：" + Path.GetFullPath(configPath);
         loaded = previous;
     }
@@ -122,7 +129,8 @@ public partial class MainWindow : Window
             ExcelNameCol = BatchPlanner.ColumnNumber(NameColumnInput.Text),
             ExcelEmailCol = BatchPlanner.ColumnNumber(EmailColumnInput.Text),
             SendInterval = SendIntervalInput.Value, MaxRetries = Integer(RetriesInput, "最多尝试次数"),
-            RetryInterval = RetryIntervalInput.Value
+            RetryInterval = RetryIntervalInput.Value,
+            GroupAttachments = GroupInput.IsChecked == true
         };
         BatchPlanner.Validate(value);
         if (value.StateFile.Length == 0) throw new InvalidDataException("请输入发送日志路径。");
@@ -135,10 +143,10 @@ public partial class MainWindow : Window
         try { if (Collect() != ViewModel.Snapshot) ViewModel.Invalidate(); }
         catch { ViewModel.Invalidate(); }
     }
-    private void SettingsTextChanged(object sender, TextChangedEventArgs args) => InvalidateIfChanged();
+    private void SettingsTextChanged(object sender, TextChangedEventArgs args) { ValidateRememberContext(); InvalidateIfChanged(); }
     private void SettingsPasswordChanged(object sender, RoutedEventArgs args) => InvalidateIfChanged();
-    private void SettingsNumberChanged(NumberBox sender, NumberBoxValueChangedEventArgs args) => InvalidateIfChanged();
-    private void SettingsSelectionChanged(object sender, SelectionChangedEventArgs args) => InvalidateIfChanged();
+    private void SettingsNumberChanged(NumberBox sender, NumberBoxValueChangedEventArgs args) { ValidateRememberContext(); InvalidateIfChanged(); }
+    private void SettingsSelectionChanged(object sender, SelectionChangedEventArgs args) { ValidateRememberContext(); InvalidateIfChanged(); }
     private void FilterChanged(object sender, RoutedEventArgs args)
     { if (loaded) ViewModel.Filter(SearchInput.Text, StateFilter.SelectedIndex); }
 
@@ -170,7 +178,7 @@ public partial class MainWindow : Window
     }
 
     private async void PickExcel(object sender, RoutedEventArgs args)
-    { try { if (await PickFile(".xlsx") is { } path) ExcelInput.Text = path; } catch (Exception exception) { await ShowError(exception.Message); } }
+    { try { if (await PickFile(".xlsx") is { } path) { ExcelInput.Text = path; await ExcelWizard(path); } } catch (Exception exception) { await ShowError(exception.Message); } }
     private async void PickTemplate(object sender, RoutedEventArgs args)
     { try { if (await PickFile(".txt") is { } path) TemplateInput.Text = path; } catch (Exception exception) { await ShowError(exception.Message); } }
 
@@ -191,8 +199,9 @@ public partial class MainWindow : Window
         try
         {
             settings = Collect();
+            if (BatchPlanner.ValidEmail(settings.SenderEmail) || RememberInput.IsChecked == true) PersistAccount(settings);
             Storage.WriteAtomic(configPath, settings);
-            await ShowDialog("设置已保存", "已保存非敏感配置，授权码未写入文件。", "确定");
+            await ShowDialog("设置已保存", RememberInput.IsChecked == true ? "配置已保存，授权码已交给 Windows 安全保存。" : "已保存配置和账户信息，授权码仅在本次会话使用。", "确定");
         }
         catch (Exception exception) { await ShowError(exception.Message); }
     }
@@ -224,9 +233,16 @@ public partial class MainWindow : Window
         {
             if (ViewModel.Snapshot is not { } snapshot || ViewModel.IsBusy) return;
             BatchPlanner.Validate(snapshot, true);
-            var count = ViewModel.Jobs.Count(job => retryOnly ? job.Status == JobStates.Failed : JobStates.CanSend(job.Status));
-            var result = await ShowDialog("确认发送计划", $"发件人：{snapshot.SenderEmail}\n将发送 {count} 封带 PDF 的邮件。\n搜索和筛选只影响显示，发送范围为整份计划。\n\n请确认已核对预览内容。", "确认发送", "取消");
-            if (result == ContentDialogResult.Primary) await ViewModel.SendAsync(snapshot.StateFile, retryOnly);
+            var queue = ViewModel.SendQueue(retryOnly);
+            if (queue.Count == 0) return;
+            var scope = ((ComboBoxItem)ScopeInput.SelectedItem).Content;
+            var result = await ShowDialog("确认发送计划", $"发件人：{snapshot.SenderEmail}\n范围：{scope}\n收件地址：{queue.Select(j => j.Email).Distinct(StringComparer.OrdinalIgnoreCase).Count()} 个\n邮件：{queue.Count} 封\n附件：{queue.Sum(j => j.AttachmentCount)} 个\n\n请确认已核对正文与附件。", "确认发送", "取消");
+            if (result == ContentDialogResult.Primary)
+            {
+                SaveCurrentTask(snapshot);
+                try { await ViewModel.SendAsync(snapshot.StateFile, retryOnly, queue); }
+                finally { SaveCurrentTask(snapshot); }
+            }
         }
         catch (Exception exception) { await ShowError(exception.Message); }
     }
@@ -257,6 +273,7 @@ public partial class MainWindow : Window
             var result = await ShowDialog("核实发送结果", $"请先在邮箱中核对：\n{job.Filename}\n{job.Email}\n\n确认是否已经送达后再选择。", "已送达，标记成功", "取消", "确认未送达，允许重试");
             if (result == ContentDialogResult.None) return;
             ViewModel.Resolve(ViewModel.Snapshot.StateFile, result == ContentDialogResult.Primary);
+            SaveCurrentTask(ViewModel.Snapshot);
         }
         catch (Exception exception) { await ShowError(exception.Message); }
     }
@@ -291,6 +308,7 @@ public partial class MainWindow : Window
             SenderEmail = "sender@example.com", AttachmentFolder = @"D:\邮件资料\PDF附件",
             StudentInfoExcel = @"D:\邮件资料\学生信息.xlsx", EmailTemplate = @"D:\邮件资料\邮件模板.txt"
         };
+        settings = demoSettings;
         FillForm(demoSettings, @"D:\邮件资料\status.json");
         ViewModel.LoadDemo([
             new() { Filename = "001_学习资料.pdf", StudentId = "001", Name = "张三", Email = "zhangsan@example.com", Subject = "张三同学的学习资料", Body = "张三同学：\n\n您好！学号 001 的学习资料已随邮件以 PDF 附件发送，请查收。\n\n如有疑问，请回复本邮件。\n\n祝学习顺利！", Key = "demo1" },

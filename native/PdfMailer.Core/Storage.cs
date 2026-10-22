@@ -108,7 +108,7 @@ public static class Storage
         { throw new IOException("另一个任务正在使用这份发送日志，请等待其结束。", exception); }
     }
 
-    public static void ResolveUncertain(string path, string key, bool delivered)
+    public static void ResolveUncertain(string path, string key, bool delivered, IEnumerable<string>? relatedKeys = null)
     {
         using var journalLock = AcquireJournal(path);
         var journal = LoadJournal(path);
@@ -117,6 +117,11 @@ public static class Storage
         record.Status = delivered ? JobStates.Success : JobStates.Failed;
         record.Error = "用户已核实发送结果";
         record.Time = DateTimeOffset.Now.ToString("O");
+        foreach (var related in relatedKeys ?? [])
+            if (journal.Records.TryGetValue(related, out var child) && child.Status is JobStates.Sending or JobStates.Uncertain)
+            {
+                child.Status = record.Status; child.Error = record.Error; child.Time = record.Time;
+            }
         WriteAtomic(path, journal);
     }
 }

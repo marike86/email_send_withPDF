@@ -18,6 +18,8 @@ public sealed record MailSettings
     public int ExcelStudentIdCol { get; set; } = 1;
     public int ExcelNameCol { get; set; } = 2;
     public int ExcelEmailCol { get; set; } = 3;
+    public string ExcelWorksheet { get; set; } = "";
+    public bool GroupAttachments { get; set; }
     public double SendInterval { get; set; } = 3;
     public int MaxRetries { get; set; } = 3;
     public double RetryInterval { get; set; } = 10;
@@ -38,6 +40,11 @@ public static class JobStates
 
 public sealed partial class MailJob : ObservableObject
 {
+    [ObservableProperty] private bool isIncluded = true;
+    public IReadOnlyList<MailAttachment> Attachments { get; init; } = [];
+    [JsonIgnore] public IReadOnlyList<MailAttachment> Files => Attachments.Count > 0 ? Attachments : [new(Filename, Filepath, Digest)];
+    [JsonIgnore] public int AttachmentCount => Files.Count;
+    [JsonIgnore] public bool IncludeAllowed => JobStates.CanSend(Status);
     public string Filename { get; init; } = "";
     public string Filepath { get; set; } = "";
     public string StudentId { get; init; } = "";
@@ -47,12 +54,14 @@ public sealed partial class MailJob : ObservableObject
     public string Body { get; set; } = "";
     public string Digest { get; set; } = "";
     public string Key { get; set; } = "";
-    [ObservableProperty, NotifyPropertyChangedFor(nameof(StatusLabel))]
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(StatusLabel)), NotifyPropertyChangedFor(nameof(IncludeAllowed))]
     private string status = JobStates.Ready;
     [ObservableProperty] private string error = "";
     public string StatusLabel => JobStates.Label(Status);
     public string Recipient => $"{Name} <{Email}>";
 }
+
+public sealed record MailAttachment(string Filename, string Filepath, string Digest, string IdentityKey = "");
 
 public sealed record Student(string Name, string Email);
 public sealed record MailTemplate(string Subject, string Body);

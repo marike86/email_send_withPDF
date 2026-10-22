@@ -24,7 +24,13 @@ try {
         $qaDirectory = Join-Path $repositoryRoot ('artifacts/smoke-' + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Force $qaDirectory | Out-Null
         $appProcess = Start-Process -FilePath (Join-Path $OutputDirectory 'PdfMailer.exe') -ArgumentList @('--smoke-test',('"' + $qaDirectory + '"')) -WindowStyle Hidden -PassThru
-        if (!$appProcess.WaitForExit(60000)) { $appProcess.Kill(); throw 'WinUI smoke test timed out.' }
+        $smokeDeadline = [DateTime]::UtcNow.AddSeconds(60)
+        # 某些桌面隔离环境的等待句柄不能报告退出，查询实际进程状态。
+        while (!$appProcess.HasExited -and [DateTime]::UtcNow -lt $smokeDeadline) {
+            Start-Sleep -Milliseconds 100
+            $appProcess.Refresh()
+        }
+        if (!$appProcess.HasExited) { $appProcess.Kill(); throw 'WinUI smoke test timed out.' }
         if ($appProcess.ExitCode -ne 0) { throw "WinUI exited with code $($appProcess.ExitCode)." }
         $reportPath = Join-Path $qaDirectory 'smoke-report.json'
         if (!(Test-Path -LiteralPath $reportPath)) { throw 'WinUI did not write a smoke report.' }
