@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import smtplib
 import ssl
+import sys
 import tempfile
 import threading
 from zipfile import BadZipFile
@@ -456,6 +457,13 @@ def export_results(jobs, output_path):
 
 def main(argv=None):
     """命令行支持离线预检、失败重试、指定配置和结果导出。"""
+    # Windows 非中文区域设置的重定向输出可能默认使用 cp1252。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass  # 测试捕获器等只读包装流仍可使用自身编码策略。
     parser = argparse.ArgumentParser(description="PDF 批量邮件 · 先预检，再发送")
     parser.add_argument("-p", "--path", help="PDF 附件目录")
     parser.add_argument("--config", default="config.json", help="配置文件")

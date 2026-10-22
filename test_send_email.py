@@ -1,6 +1,7 @@
 """离线回归测试；所有 SMTP 调用均为模拟，不会发送邮件。"""
 
 import csv
+import io
 import json
 import os
 from pathlib import Path
@@ -164,7 +165,7 @@ class BatchTests(unittest.TestCase):
         app.save_config(dict(self.config, email_template="template.txt"), config_path)
         self.assertNotIn("secret", config_path.read_text())
         self.assertNotIn("sender_password", json.loads(config_path.read_text()))
-        self.assertEqual(app.load_config(config_path)["email_template"], str(self.template))
+        self.assertTrue(Path(app.load_config(config_path)["email_template"]).samefile(self.template))
 
     def test_environment_uses_correct_names(self):
         with patch.dict(os.environ, {"SMTP_SERVER": "smtp.example.com", "SMTP_PORT": "465", "USE_SSL": "true"}):
@@ -274,6 +275,18 @@ class BatchTests(unittest.TestCase):
         self.excel.write_text("not a workbook")
         with self.assertRaisesRegex(ValueError, "无法读取 Excel"):
             self.prepare()
+
+    def test_cli_handles_non_chinese_windows_output_encoding(self):
+        config_path = self.root / "config.json"
+        app.save_config(self.config, config_path)
+        buffer = io.BytesIO()
+        stream = io.TextIOWrapper(buffer, encoding="cp1252")
+        with patch.object(app.sys, "stdout", stream):
+            code = app.main(["--config", str(config_path), "-p", str(self.folder),
+                             "--state", str(self.state), "--dry-run"])
+        stream.flush()
+        self.assertEqual(code, 0)
+        self.assertIn("待发送", buffer.getvalue().decode("utf-8"))
 
 
 if __name__ == "__main__":
