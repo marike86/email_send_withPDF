@@ -1,30 +1,31 @@
 # 配置指南
 
-复制 `config.example.json` 为 `config.json`，或在桌面版保存设置。
+桌面版默认使用 `%LOCALAPPDATA%\PdfMailer\config.json`。也可以通过 `--config` 指定，或在界面导入 `config.example.json` 的副本。
 
-| 配置项 | 说明 |
+| 字段 | 说明 |
 |---|---|
 | smtp_server | 邮箱提供商的 SMTP 主机名 |
 | smtp_port | 1–65535；465 自动使用隐式 SSL |
-| use_ssl / use_tls | 隐式 SSL / STARTTLS；发信必须加密；use_ssl 优先 |
-| sender_email | 单个发件邮箱地址 |
-| student_info_excel | 学生信息 `.xlsx`，第一行为表头，读取活动工作表 |
-| email_template | UTF-8 文本模板；第一行为主题，其余为正文 |
-| attachment_folder | PDF 附件目录，也可通过 `-p` 指定 |
-| excel_student_id_col | 学号列，默认 1（A），支持 AA 等字母 |
+| use_ssl / use_tls | 隐式 SSL / STARTTLS，SSL 优先，发送必须加密 |
+| sender_email | 单个发件邮箱 |
+| student_info_excel | `.xlsx` 学生表，首行为表头，读取活动工作表 |
+| email_template | UTF-8 模板，第一行为主题，其余为正文 |
+| attachment_folder | PDF 附件目录 |
+| state_file | 原生桌面版发送日志；CLI 请显式使用 --state |
+| excel_student_id_col | 学号列，默认 1（A） |
 | excel_name_col | 姓名列，默认 2（B） |
 | excel_email_col | 邮箱列，默认 3（C） |
-| send_interval | 邮件间隔秒数，默认 3，可为非负小数 |
-| max_retries | 最多尝试次数，含首次，1–10，默认 3 |
-| retry_interval | 临时故障重试间隔秒数，默认 10 |
+| send_interval | 每封邮件间隔秒数，默认 3 |
+| max_retries | 含首次在内的最多尝试次数，1–10，默认 3 |
+| retry_interval | 临时故障重试间隔，默认 10 秒 |
 
-所有配置项都支持对应大写环境变量，例如 `SMTP_SERVER`、`SMTP_PORT`、`USE_TLS`、`USE_SSL`、`SENDER_EMAIL`、`SENDER_PASSWORD`。布尔变量支持 true/false 或 1/0。环境变量优先于配置文件，命令行 `--smtp`、`--port`、`--email` 再覆盖对应参数。
+间隔允许小数，原生版取 0–86400 秒。列号支持整数和 A、AA 等字母，三列必须不同。学号必须唯一；前导零应实际存为文本，仅设置 Excel 显示格式无法恢复。
 
-授权码应在界面或命令行隐藏输入，或通过 `SENDER_PASSWORD` 提供。保存配置始终排除 `sender_password`。可保留已有配置中的密码供旧版迁移，但建议保存一次以移除。
+配置中的相对路径以配置文件目录为基准。导入后会转换为完整路径。环境变量使用对应大写名，如 `SMTP_SERVER`、`SMTP_PORT`、`USE_SSL`、`SENDER_EMAIL`、`SENDER_PASSWORD`；布尔值为 true/false 或 1/0。环境变量在加载配置时覆盖文件内容。
 
-配置内的相对路径以配置文件目录为基准；命令行路径相对当前工作目录。模板找不到时会报错，不再擅自替换为同名文件。
+授权码在界面 PasswordBox 中输入，仅本次使用。配置保存始终排除 `sender_password`。可读取旧配置中的密码兼容迁移，保存后移除。
 
-## 模板和文件名
+## 模板
 
 ```text
 Subject: {姓名}同学的资料
@@ -33,16 +34,18 @@ Subject: {姓名}同学的资料
 您好，学号 {学号} 的资料请查收附件。
 ```
 
-也支持第一行没有 `Subject:` 前缀。兼容旧模板中裸写的“姓名”，因此普通正文不宜包含其他用途的“姓名”字样。
+主题也可省略 `Subject:` 前缀。兼容旧模板中裸写的“姓名”，因此普通正文不宜包含其他用途的“姓名”字样。原生版单次替换，不会再将插入的姓名内容当作新占位符。
 
-文件名支持 `学号_说明.pdf`、`学号.pdf`、`签署后：学号_说明.pdf` 和半角冒号形式。学号为连续数字。为避免匹配到错误的人，不再从任意文件名中截取一段数字。
+文件名支持 `学号_说明.pdf`、`学号.pdf`、`签署后：学号_说明.pdf` 和半角冒号形式，学号为连续数字。扩展名不区分大小写；不从任意文件名中截取一段数字。
 
-Excel 学号必须唯一；缺失姓名或无效邮箱会阻止对应附件发送；重复学号会阻止整个预检。文本前导零会保留；Excel 数字格式显示出来的前导零无法恢复，请将学号实际保存为文本。
+## SMTP
 
-## 加密与错误处理
+465 使用 SSL/TLS；其他端口配合 STARTTLS。自定义隐式 SSL 端口勾选 SSL/TLS。MailKit 默认验证证书，不关闭验证、不明文认证。请按邮箱提供商的当前说明获取授权码或应用专用密码。
 
-465 使用 `SMTP_SSL`；其他端口配合 `use_tls: true` 使用 STARTTLS；自定义隐式 SSL 端口设置 `use_ssl: true`。证书验证默认开启。请以邮箱提供商公布的 SMTP 配置和认证方式为准。
+连接故障及 SMTP 临时响应可重试；认证失败、附件错误等不会反复重试。提交时断线无法确认是否送达，将标为待核实。
 
-仅连接故障和 SMTP 临时响应会自动重试；认证失败、永久拒绝、附件问题不会自动反复发送。提交阶段断线无法确定是否送达，状态为“待核实”。在桌面版核对邮箱后处理，或保留日志并人工核实。
+## 日志迁移
 
-发送日志格式、旧日志迁移及命令行示例见 [README](README.md)。
+原生桌面版与上一版 Python 的 `version: 2` 日志兼容，同一附件实际路径、内容、账户、收件人、主题及正文会生成相同身份。导入配置时会查找配置旁边的 `status.json`，请核对路径。
+
+最早版日志仅按文件名记录，无法可靠判断发送内容，新版会报错并保留文件。请备份并核对邮箱后，使用新的日志或将确认未发送的附件放到单独目录。不自动删除历史，不静默重置。

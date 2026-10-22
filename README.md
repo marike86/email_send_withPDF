@@ -1,81 +1,78 @@
-# PDF 邮件工作台
+# PDF 邮件工作台 · 原生 WinUI 3
 
-根据 PDF 文件名中的学号匹配 Excel 学生信息，预览后批量发送邮件。
+按 PDF 文件名中的学号匹配 Excel 学生信息，预览后批量发送。桌面应用已迁移到 **C# + .NET 10 + Windows App SDK / WinUI 3 + XAML**，不再使用 Qt 或 Python 桌面界面。
 
-桌面版采用 **WinUI 3 / Fluent 视觉风格**：浅色卡片、侧边导航、圆角输入和蓝色主操作，使用 Python + Qt 实现；不是原生 Windows App SDK 应用。
+## 使用桌面版
 
-## 快速开始
+从 PR 的 Windows 构建产物获取 `PdfMailer-win-x64`，完整解压后运行 `PdfMailer.exe`。自包含目录中带有 .NET 和 Windows App SDK 运行时，不需要安装 Python。请保留目录内全部依赖文件。
 
-需要 Python 3.10 或更高版本。桌面版安装：
+目标系统为 64 位 Windows 11 / Windows 10 2004 及以上。桌面版采用原生 NavigationView、TextBox、ComboBox、NumberBox、文件选择器和 ContentDialog，支持系统浅色/深色主题及 DPI 缩放。
 
-```powershell
-python -m pip install -r requirements-gui.txt
-python send_email_gui.py
-```
+1. 准备 `.xlsx`：第一行表头，包含唯一学号、姓名和单个邮箱；含前导零的学号存为文本。
+2. 准备 PDF：如 `2023001_资料.pdf`、`签署后：2023001_001.pdf`、`2023001.pdf`。
+3. 选择 PDF 目录、Excel 和 UTF-8 邮件模板，可使用 `examples/email_template.txt`。
+4. 在“账户与设置”填写邮箱、授权码、SMTP、加密方式及 Excel 列映射。
+5. 点击“检查文件”，逐行查看匹配结果和邮件预览。
+6. 点击“开始发送”，核对发件账户和数量后确认。
 
-仅使用命令行时安装 `requirements.txt`，无需 Qt。
+邮件预览使用单层原生 ScrollViewer 和可选中文本，自动换行、纵向滚动，无嵌套文本编辑框和横向滚动条。切换邮件会回到正文顶部。搜索和状态筛选只改变显示，发送范围仍是整份计划中的可发送记录。
 
-1. 准备 `.xlsx`：第一行表头，默认 A=学号、B=姓名、C=邮箱；学号含前导零时存为文本。
-2. 准备 PDF 目录：支持 `2023001_资料.pdf`、`签署后：2023001_001.pdf`、`2023001.pdf`，扩展名不区分大小写。
-3. 选择 UTF-8 模板，可直接使用 [示例模板](examples/email_template.txt)。
-4. 在“账户与设置”填写发件邮箱、SMTP 服务器、端口、加密方式和授权码。
-5. 点击“检查文件”，逐行预览收件人、附件、主题和正文，修正需关注项。
-6. 点击“开始发送”，核对发送数量并确认。需修正和待核实项不会发送。
+## 功能与可靠性
 
-授权码不会写入配置文件。可点击“保存设置”保存其他参数；下次会话需重新输入授权码，或通过 `SENDER_PASSWORD` 环境变量提供。
+- 离线预检：拒绝重复学号，提示无匹配信息、缺失姓名、无效邮箱和非 PDF 内容。
+- Excel 一次加载，支持 A、AA 等多字母列，及时释放文件。
+- MailKit 发送 SSL/STARTTLS 邮件并验证证书，授权码不保存到配置。
+- 后台任务、停止后续邮件、失败重试和断点续发。
+- 原子日志、跨进程文件锁、提交前检查点，日志写入失败停止发送。
+- 提交阶段断线或中断标记“待核实”，不自动重发；核实后可标记成功或允许重试。
+- XLSX/UTF-8 BOM CSV 导出，保留文本学号，避免内容被识别为公式。
 
-## 功能
+SMTP 接受提交不等于最终投递成功，退信需在邮箱核对。PDF 检查仅验证文件开头标识，不解析整份文件。
 
-- 离线预检：重复学号、无效邮箱、未匹配学号、非 PDF 内容、缺失姓名均明确提示。
-- 一次读取 Excel，支持 A、AA 等多字母列，及时释放文件句柄。
-- 逐封邮件预览，按姓名、邮箱、学号、文件名搜索，按状态筛选。
-- 后台发送不阻塞界面，支持停止后续邮件；当前 SMTP 请求完成或超时后停止。
-- SSL（通常 465）与 STARTTLS（通常 587）均校验证书，拒绝明文认证。
-- 原子写入发送日志，自动跳过已成功发送的同一任务；失败重试成功后覆盖旧失败记录。
-- 提交中断或发送时崩溃的邮件标记“待核实”，不自动重发。核对邮箱后可标记成功或允许重试。
-- 导出全部预检和发送结果为 XLSX 或 Excel 可读的 UTF-8 BOM CSV。
+## 配置与迁移
 
-“待发送”统计包含可重试失败项；“需关注”包含失败、需修正及待核实记录。
+默认配置和日志位于 `%LOCALAPPDATA%\PdfMailer\config.json`、`status.json`。保存设置不写入授权码；也可用 `SENDER_PASSWORD` 环境变量提供。
 
-## 命令行
+“账户与设置 → 导入已有配置”可读取原 Python 配置，配置中的相对路径以原配置文件目录为基准。若旁边存在 `status.json`，优先使用该日志；随后保存设置会把非敏感参数写到当前应用配置。旧配置中的明文授权码只兼容读取，保存时会移除。
 
-复制 `config.example.json` 为 `config.json` 并修改路径和账户。
+桌面版兼容上一版 `version: 2` 日志的身份哈希；附件绝对路径、内容、账户、收件人、主题和正文相同时可继续跳过成功项。Windows 路径会规范化大小写和实际路径。移动附件或改内容会产生新任务，发送前务必核对计划。
+
+更早的 `processed_files` 格式及损坏日志会明确报错，不静默重置。请备份、核对已发送邮件后再改用新日志，只处理确认未送达的文件。同批任务应始终使用同一日志；跨语言同时使用时也必须指定相同日志。
 
 ```powershell
-# 只检查，不连接 SMTP，不要求授权码
-python send_email.py --config config.json -p "D:\PDF" --dry-run --export results.csv
-
-# 预检后输入 SEND 才发送；授权码隐藏输入
-python send_email.py --config config.json -p "D:\PDF"
-
-# 只重试日志中的失败项
-python send_email.py --config config.json -p "D:\PDF" --retry-failed
-
-# 查看日志
-python send_email.py --status
-
-# 分别指定配置和发送日志，GUI 也支持这两个选项
-python send_email_gui.py --config "D:\任务\config.json" --state "D:\任务\status.json"
+PdfMailer.exe --config "D:\邮件任务\config.json" --state "D:\邮件任务\status.json"
+# 演示数据，不连接 SMTP、不保存配置
+PdfMailer.exe --demo
 ```
 
-配置路径相对当前工作目录解析；配置中相对文件路径以配置文件所在目录为基准。`--state`、`--path` 和 `--export` 相对当前工作目录解析，程序不再切换工作目录。CLI 退出码：0=无错误，1=预检/发送错误或待核实，130=用户中断。
+## 从源码构建
 
-## 发送历史与兼容性
-
-日志是 `version: 2` 的 JSON，以附件绝对路径、内容指纹、发件人、收件人、主题及正文共同识别任务。移动附件、更换账户/收件人或修改内容会形成新任务，发送前务必核对计划。多个进程共用同一日志时有系统文件锁；不要使用不同日志同时发送同一批文件。
-
-旧版 `status.json` 仅按文件名记录，无法可靠判断账户和内容。新版遇到旧日志或损坏日志会停止，不会静默重置。请备份旧日志、核对已发送邮件后，用 `--state` 指定新的日志，只向确认尚未送达的附件发送。`--restart` 不再删除历史；`--password` 参数已移除，改用隐藏输入或环境变量。
-
-已有旧配置中的授权码仍可读取以兼容旧版本；保存设置会从配置中移除它。建议迁移后保存一次配置。
-
-SMTP 接受提交不等于收件人最终收到邮件，退信仍需在邮箱检查。PDF 标识检查仅验证文件开头，不进行完整 PDF 内容校验。
-
-## 验证
+需要 .NET 10 SDK 和 Windows 构建环境。Windows SDK 工具和 Windows App SDK 通过已固定版本的 NuGet 包还原。
 
 ```powershell
-python -m unittest -v test_send_email test_gui
+dotnet test native/PdfMailer.Tests/PdfMailer.Tests.csproj -c Release
+dotnet build native/PdfMailer.App/PdfMailer.App.csproj -c Release -p:Platform=x64
+# 验证、发布自包含桌面版，并执行原生 UI 冒烟测试
+pwsh scripts/build-native.ps1 -SmokeTest
 ```
 
-测试覆盖发送协议、续发、重试、异常断线、日志写入失败、停止、配置、预检、CSV 及 GUI 后台交互。SMTP 全部模拟，不发送真实邮件。GUI 测试使用离屏模式；未安装 Qt 时会跳过 GUI 测试。CI 配置覆盖 Windows/Linux 与 Python 3.10/3.14。
+输出位于 `artifacts/win-x64`。WinUI XAML 编译器对较长的依赖路径有限制，如遇 WMC1006，请将 `NUGET_PACKAGES` 设置到较短的可写目录后重新还原。项目不会要求管理员权限，也不自动安装系统工作负载。
 
-更多配置见 [配置指南](CONFIG_GUIDE.md)，操作说明见 [使用说明](使用说明.md)。
+## 测试
+
+- `PdfMailer.Tests`：原生 C# 业务回归，SMTP 全部模拟，不发送真实邮件。
+- `PdfMailer.exe --smoke-test <输出目录>`：使用安全演示数据，实际启动 WinUI，检查原生筛选和长邮件滚动，输出浅色、深色、设置页及长正文 PNG 与 JSON 报告。
+- CI：Windows/Linux 的 .NET 业务回归、Windows 原生构建/发布/UI 冒烟，以及保留的 Python CLI 回归。
+
+## Python CLI 兼容入口
+
+保留 `send_email.py` 及其回归供既有脚本使用；桌面版完全不调用它。
+
+```powershell
+python -m pip install -r requirements.txt
+python send_email.py --config config.json -p "D:\PDF" --dry-run --export results.xlsx
+python send_email.py --config config.json -p "D:\PDF" --state "D:\邮件任务\status.json"
+python -m unittest -v test_send_email
+```
+
+CLI 使用 `--state` 指定日志，不自动读取原生配置的 `state_file` 字段。详细参数见 [配置指南](CONFIG_GUIDE.md)，操作步骤见 [使用说明](使用说明.md)。

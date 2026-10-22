@@ -17,3 +17,11 @@
 *.tmp
 failed_records_*.xlsx
 邮件发送结果*.csv
+邮件发送结果*.xlsx
+**/bin/
+**/obj/
+artifacts/
+TestResults/
+*.user
+*.suo
+.vs/
